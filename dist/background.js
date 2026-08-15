@@ -1,6 +1,9 @@
 const STORAGE_KEY = 'presets';
 const GROUPS_KEY = 'groups';
 const RUN_KEY = 'runState';
+const EXPORT_SCHEMA_VERSION = 1;
+const MAX_IMPORT_PRESETS = 500;
+const MAX_IMPORT_GROUPS = 100;
 const captureTabs = new Set();
 
 let runState = null;
@@ -432,6 +435,41 @@ async function handleMessage(msg, sender) {
       const tab = await chrome.tabs.get(msg.tabId);
       return tab.url || '';
     }
+    case 'EXPORT_DATA': {
+      return {
+        presets: await getPresets(),
+        groups: await getGroups()
+      };
+    }
+    case 'IMPORT_DATA': {
+      const imported = validateImportData(msg.data);
+      const existingPresets = await getPresets();
+      const existingGroups = await getGroups();
+
+      const idMap = new Map();
+      const now = Date.now();
+      for (const preset of imported.presets) {
+        const oldId = preset.id;
+        preset.id = crypto.randomUUID();
+        if (oldId) idMap.set(oldId, preset.id);
+        preset.createdAt = preset.createdAt || now;
+        preset.updatedAt = now;
+      }
+
+      const groups = [];
+      for (const group of imported.groups) {
+        const steps = (group.steps || []).filter((s) => idMap.has(s.presetId));
+        if (steps.length === 0) continue;
+        group.steps = steps.map((s) => ({ ...s, presetId: idMap.get(s.presetId) }));
+        group.id = crypto.randomUUID();
+        group.updatedAt = now;
+        groups.push(group);
+      }
+
+      await savePresets(existingPresets.concat(imported.presets));
+      await saveGroups(existingGroups.concat(groups));
+      return { importedPresets: imported.presets.length, importedGroups: groups.length };
+    }
     default:
       throw new Error('알 수 없는 메시지 타입: ' + msg.type);
   }
@@ -487,3 +525,45 @@ async function resumeRunAfterRestore() {
 }
 
 restoreRunState().then(resumeRunAfterRestore);
+
+function validateImportData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('지원되지 않는 파일 형식입니다.');
+  }
+  if (typeof data.schemaVersion !== 'number' || data.schemaVersion < 1) {
+    throw new Error('지원되지 않는 파일 형식입니다.');
+  }
+  if (data.schemaVersion > EXPORT_SCHEMA_VERSION) {
+    throw new Error('새 버전의 파일입니다. 확장 프로그램을 업데이트하세요.');
+  }
+
+  const rawPresets = Array.isArray(data.presets) ? data.presets : [];
+  const rawGroups = Array.isArray(data.groups) ? data.groups : [];
+
+  const presets = [];
+  for (const p of rawPresets.slice(0, MAX_IMPORT_PRESETS)) {
+    if (!p || typeof p !== 'object') continue;
+    if (typeof p.name !== 'string' || typeof p.urlPattern !== 'string') continue;
+    if (!Array.isArray(p.fields)) continue;
+    const fieldsValid = p.fields.every(
+      (f) => f && typeof f === 'object' && typeof f.label === 'string' && typeof f.selector === 'string' && typeof f.value === 'string'
+    );
+    if (!fieldsValid) continue;
+    presets.push({ ...p });
+  }
+
+  const presetIds = new Set(presets.map((p) => p.id).filter(Boolean));
+
+  const groups = [];
+  for (const g of rawGroups.slice(0, MAX_IMPORT_GROUPS)) {
+    if (!g || typeof g !== 'object') continue;
+    if (typeof g.name !== 'string' || !Array.isArray(g.steps)) continue;
+    const steps = g.steps.filter(
+      (s) => s && typeof s === 'object' && typeof s.presetId === 'string' && presetIds.has(s.presetId)
+    );
+    if (steps.length === 0) continue;
+    groups.push({ ...g, steps: steps.map((s) => ({ ...s })) });
+  }
+
+  return { presets, groups };
+}

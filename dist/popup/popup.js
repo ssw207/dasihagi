@@ -393,6 +393,82 @@
     refreshRunStatus();
   });
 
+  $('#btn-export').addEventListener('click', async () => {
+    const resp = await sendMessage({ type: 'EXPORT_DATA' });
+    if (!resp.ok) {
+      showToast('내보내기 실패: ' + resp.error);
+      return;
+    }
+    const data = resp.data || {};
+    const presets = Array.isArray(data.presets) ? data.presets : [];
+    const groups = Array.isArray(data.groups) ? data.groups : [];
+    if (presets.length === 0 && groups.length === 0) {
+      showToast('내보낼 데이터가 없습니다.');
+      return;
+    }
+
+    const payload = {
+      schemaVersion: 1,
+      appId: 'form-preset-extension',
+      exportedAt: new Date().toISOString(),
+      presets,
+      groups
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const now = new Date();
+    const dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'presets-' + dateStr + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('내보내기 완료: 프리셋 ' + presets.length + '개, 그룹 ' + groups.length + '개');
+  });
+
+  $('#btn-import').addEventListener('click', () => {
+    $('#import-file').click();
+  });
+
+  $('#import-file').addEventListener('change', async (e) => {
+    const input = e.target;
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      if (file.size > 5 * 1024 * 1024) {
+        showToast('파일이 너무 큽니다.');
+        return;
+      }
+      const text = await file.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (err) {
+        showToast('파일을 읽을 수 없습니다. 올바른 JSON 파일인지 확인하세요.');
+        return;
+      }
+      const presetCount = Array.isArray(data.presets) ? data.presets.length : 0;
+      const groupCount = Array.isArray(data.groups) ? data.groups.length : 0;
+      const msg = '프리셋 ' + presetCount + '개, 그룹 ' + groupCount + '개를 가져옵니다. ' +
+        '기존 항목은 유지되고 새 항목으로 추가됩니다. 계속할까요?';
+      if (!confirm(msg)) return;
+
+      const resp = await sendMessage({ type: 'IMPORT_DATA', data });
+      if (!resp.ok) {
+        showToast('가져오기 실패: ' + resp.error);
+        return;
+      }
+      const result = resp.data || {};
+      showToast(
+        '가져오기 완료: 프리셋 ' + (result.importedPresets || 0) + '개, 그룹 ' + (result.importedGroups || 0) + '개'
+      );
+      await loadPresets();
+      await loadGroups();
+    } finally {
+      input.value = '';
+    }
+  });
+
   function backToList() {
     editorView.classList.add('hidden');
     listView.classList.remove('hidden');
