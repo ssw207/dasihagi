@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "폼 프리셋",
+  "version": "0.1.0",
+  "description": "사이트별 폼 자동 세팅 프리셋. 원하는 인풋을 클릭해 값을 저장하고 한 번에 적용하세요.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "폼 프리셋"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
