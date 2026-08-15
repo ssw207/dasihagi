@@ -6,5 +6,8 @@
   "scripts": {
     "check": "node --check background.js && node --check content.js && node --check popup/popup.js && node -e \"JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest OK')\"",
     "build": "node scripts/build.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
   }
 }
