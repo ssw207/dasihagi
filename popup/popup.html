@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>폼 프리셋</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>폼 프리셋</h1>
+      <div class="site-chip" id="site-chip">현재 사이트를 확인 중...</div>
+    </header>
+
+    <section id="list-view">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btn-new-preset">+ 새 프리셋</button>
+        <button class="btn" id="btn-refresh">새로고침</button>
+      </div>
+      <div class="preset-list" id="preset-list"></div>
+      <div class="empty-state" id="empty-state">
+        <p>아직 프리셋이 없습니다.</p>
+        <p class="hint">프리셋을 만들고 캡처 모드에서 원하는 입력란을 클릭해 값을 저장하세요.</p>
+      </div>
+    </section>
+
+    <section id="editor-view" class="hidden">
+      <div class="editor">
+        <div class="editor-head">
+          <h2 id="editor-title">새 프리셋</h2>
+          <button class="btn btn-ghost" id="btn-back">← 목록</button>
+        </div>
+        <label for="ed-name">프리셋 이름</label>
+        <input type="text" id="ed-name" placeholder="예: 회원가입 폼">
+        <label for="ed-pattern">사이트 패턴</label>
+        <input type="text" id="ed-pattern" placeholder="예: example.com 또는 *.example.com/*">
+        <label class="check-row">
+          <input type="checkbox" id="ed-autoapply">
+          <span>페이지 진입 시 자동 적용</span>
+        </label>
+
+        <div class="fields-head">
+          <h3>저장된 필드 <span class="field-count" id="field-count">0</span></h3>
+          <button class="btn btn-small btn-primary" id="btn-capture">캡처 모드 시작</button>
+        </div>
+        <div class="fields-list" id="fields-list"></div>
+        <div class="fields-empty" id="fields-empty">아직 저장된 필드가 없습니다.</div>
+
+        <div class="editor-actions">
+          <button class="btn btn-danger" id="btn-delete-preset" style="display:none">프리셋 삭제</button>
+          <span class="spacer"></span>
+          <button class="btn" id="btn-cancel-editor">취소</button>
+          <button class="btn btn-primary" id="btn-save-preset">저장</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="toast" id="toast"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

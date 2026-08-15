@@ -1,0 +1,10 @@
+{
+  "name": "form-preset-extension",
+  "private": true,
+  "version": "0.1.0",
+  "description": "사이트별 폼 자동 세팅 프리셋 Chrome Extension",
+  "scripts": {
+    "check": "node --check background.js && node --check content.js && node --check popup/popup.js && node -e \"JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest OK')\"",
+    "build": "node scripts/build.js"
+  }
+}
