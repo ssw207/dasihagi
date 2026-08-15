@@ -411,6 +411,45 @@
     });
   }
 
+  function submitForm(selector) {
+    return new Promise((resolve) => {
+      function trySubmit() {
+        let btn = null;
+        if (selector) {
+          try {
+            btn = document.querySelector(selector);
+          } catch (e) {
+            btn = null;
+          }
+        }
+        if (!btn) {
+          btn =
+            document.querySelector('button[type="submit"], input[type="submit"], input[type="image"]') ||
+            document.querySelector('form button') ||
+            document.querySelector('form input[type="button"]');
+        }
+        if (btn) {
+          btn.click();
+          resolve({ ok: true, clicked: true });
+          return;
+        }
+        const form = document.querySelector('form');
+        if (form) {
+          try {
+            form.requestSubmit();
+            resolve({ ok: true, clicked: false });
+            return;
+          } catch (e) {
+            resolve({ ok: false, reason: '폼 제출에 실패했습니다.' });
+            return;
+          }
+        }
+        resolve({ ok: false, reason: '제출 버튼을 찾을 수 없습니다.' });
+      }
+      setTimeout(trySubmit, 0);
+    });
+  }
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'CAPTURE_START') {
       startCaptureMode(msg.presetId);
@@ -425,6 +464,12 @@
     if (msg.type === 'APPLY_PRESET') {
       applyPreset(msg.preset).then((result) => {
         sendResponse({ result: result });
+      });
+      return true;
+    }
+    if (msg.type === 'SUBMIT_FORM') {
+      submitForm(msg.selector).then((result) => {
+        sendResponse(result);
       });
       return true;
     }

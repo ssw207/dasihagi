@@ -12,7 +12,14 @@
       <div class="site-chip" id="site-chip">현재 사이트를 확인 중...</div>
     </header>
 
-    <section id="list-view">
+    <nav class="tabs">
+      <button class="tab active" data-tab="presets" id="tab-presets">프리셋</button>
+      <button class="tab" data-tab="groups" id="tab-groups">그룹</button>
+    </nav>
+
+    <div id="run-status-wrap" class="hidden"></div>
+
+    <section id="presets-view">
       <div class="toolbar">
         <button class="btn btn-primary" id="btn-new-preset">+ 새 프리셋</button>
         <button class="btn" id="btn-refresh">새로고침</button>
@@ -24,7 +31,19 @@
       </div>
     </section>
 
-    <section id="editor-view" class="hidden">
+    <section id="groups-view" class="hidden">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btn-new-group">+ 새 그룹</button>
+        <button class="btn" id="btn-refresh-groups">새로고침</button>
+      </div>
+      <div class="group-list" id="group-list"></div>
+      <div class="empty-state" id="groups-empty">
+        <p>아직 그룹이 없습니다.</p>
+        <p class="hint">여러 페이지(A, B, C)를 순서대로 채우고 저장하려면 그룹을 만드세요.</p>
+      </div>
+    </section>
+
+    <section id="preset-editor-view" class="hidden">
       <div class="editor">
         <div class="editor-head">
           <h2 id="editor-title">새 프리셋</h2>
@@ -51,6 +70,36 @@
           <span class="spacer"></span>
           <button class="btn" id="btn-cancel-editor">취소</button>
           <button class="btn btn-primary" id="btn-save-preset">저장</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="group-editor-view" class="hidden">
+      <div class="editor">
+        <div class="editor-head">
+          <h2 id="group-editor-title">새 그룹</h2>
+          <button class="btn btn-ghost" id="btn-group-back">← 목록</button>
+        </div>
+        <label for="ge-name">그룹 이름</label>
+        <input type="text" id="ge-name" placeholder="예: 제휴사 세팅">
+
+        <div class="fields-head">
+          <h3>실행 스텝 <span class="field-count" id="step-count">0</span></h3>
+        </div>
+        <div class="steps-list" id="steps-list"></div>
+        <div class="fields-empty" id="steps-empty">아직 스텝이 없습니다. 아래에서 프리셋을 추가하세요.</div>
+
+        <div class="step-add-row">
+          <select id="ge-preset-select"></select>
+          <button class="btn btn-small btn-primary" id="btn-add-step">+ 스텝 추가</button>
+        </div>
+        <p class="hint">그룹 실행 시 각 스텝의 페이지가 새 탭으로 열리고 프리셋이 적용됩니다.</p>
+
+        <div class="editor-actions">
+          <button class="btn btn-danger" id="btn-delete-group" style="display:none">그룹 삭제</button>
+          <span class="spacer"></span>
+          <button class="btn" id="btn-group-cancel">취소</button>
+          <button class="btn btn-primary" id="btn-save-group">저장</button>
         </div>
       </div>
     </section>
