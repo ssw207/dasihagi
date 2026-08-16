@@ -3,7 +3,7 @@ const path = require('path');
 
 const root = path.join(__dirname, '..');
 const dist = path.join(root, 'dist');
-const files = ['manifest.json', 'background.js', 'content.js'];
+const files = ['manifest.json', 'background.js', 'content.js', 'secure-store.js'];
 const dirs = ['popup', 'icons'];
 
 fs.rmSync(dist, { recursive: true, force: true });

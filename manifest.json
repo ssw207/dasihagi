@@ -5,7 +5,8 @@
   "description": "사이트별 폼 자동 세팅 프리셋. 원하는 인풋을 클릭해 값을 저장하고 한 번에 적용하세요.",
   "permissions": ["storage", "tabs", "scripting"],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_popup": "popup/popup.html",

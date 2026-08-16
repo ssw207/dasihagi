@@ -203,12 +203,16 @@
         '</div>';
     }
 
+    const sensitiveHtml =
+      '<label class="fp-check"><input type="checkbox" id="fp-sensitive"><span>민감 값 (암호화 저장)</span></label>';
+
     panelEl.innerHTML =
       '<h3>필드 저장</h3>' +
       '<label for="fp-label">표시 이름</label>' +
       '<input type="text" id="fp-label" value="' + escapeHtml(label) + '">' +
       '<div class="fp-chip">' + escapeHtml(generateSelector(el)) + '</div>' +
       valueHtml +
+      sensitiveHtml +
       '<div class="fp-actions"><button class="fp-save" id="fp-save">저장</button><button class="fp-cancel" id="fp-cancel">취소</button></div>' +
       '<div class="fp-hint">표시 이름 입력 후 Enter → 값 입력, 값 입력 후 Enter로 저장합니다. 계속 캡처 모드가 유지됩니다.</div>' +
       '<div class="fp-status" id="fp-status" style="display:none"></div>';
@@ -218,6 +222,7 @@
     const labelInput = panelEl.querySelector('#fp-label');
     const valueRow = panelEl.querySelector('#fp-value-row');
     const valueInput = panelEl.querySelector('#fp-value');
+    const sensitiveInput = panelEl.querySelector('#fp-sensitive');
 
     function isImeComposing(e) {
       return e.isComposing || e.keyCode === 229;
@@ -239,6 +244,7 @@
           : valueInput.value,
         type: type
       };
+      if (sensitiveInput.checked) field.sensitive = true;
       if (!isBoolean && !field.value) {
         showStatus('값을 입력해주세요.', true);
         return;
@@ -249,6 +255,10 @@
     panelEl.querySelector('#fp-save').addEventListener('click', saveFromPanel);
     panelEl.querySelector('#fp-cancel').addEventListener('click', closePanel);
     panelEl.addEventListener('click', (e) => e.stopPropagation());
+
+    sensitiveInput.addEventListener('change', () => {
+      if (!isBoolean) valueInput.type = sensitiveInput.checked ? 'password' : 'text';
+    });
 
     labelInput.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || isImeComposing(e)) return;

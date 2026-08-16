@@ -260,6 +260,7 @@
       const item = document.createElement('div');
       item.className = 'field-item';
       const isBoolean = field.type === 'checkbox' || field.type === 'radio';
+      const isSensitive = !!field.sensitive;
       item.innerHTML =
         '<div class="field-item-top">' +
         '<span class="field-label">' + escapeHtml(field.label) + '</span>' +
@@ -269,13 +270,22 @@
         '<div class="field-value-row">' +
         (isBoolean
           ? '<input type="text" value="' + (field.value === 'true' ? '체크됨' : '체크 안 됨') + '" disabled>'
-          : '<input type="text" data-idx="' + idx + '" value="' + escapeHtml(field.value) + '" data-value-edit>') +
+          : '<input type="' + (isSensitive ? 'password' : 'text') + '" data-idx="' + idx + '" value="' + escapeHtml(field.value) + '" data-value-edit>') +
+        '<label class="field-sensitive"><input type="checkbox" data-sensitive="' + idx + '"' + (isSensitive ? ' checked' : '') + '>민감</label>' +
         '<button class="field-del" data-del="' + idx + '" title="삭제">✕</button>' +
         '</div>';
       item.querySelector('[data-del]').addEventListener('click', () => {
         editingPreset.fields.splice(idx, 1);
         renderFields();
       });
+      const sensitiveCheck = item.querySelector('[data-sensitive]');
+      if (sensitiveCheck) {
+        sensitiveCheck.addEventListener('change', (e) => {
+          editingPreset.fields[idx].sensitive = e.target.checked;
+          const input = item.querySelector('[data-value-edit]');
+          if (input) input.type = e.target.checked ? 'password' : 'text';
+        });
+      }
       fieldsList.appendChild(item);
     });
   }

@@ -1,3 +1,5 @@
+import { setSecret, getSecret, deleteSecret } from './secure-store.js';
+
 const STORAGE_KEY = 'presets';
 const GROUPS_KEY = 'groups';
 const RUN_KEY = 'runState';
@@ -48,6 +50,27 @@ async function getGroups() {
 
 async function saveGroups(groups) {
   await chrome.storage.local.set({ [GROUPS_KEY]: groups });
+}
+
+// 민감 필드 복호화 헬퍼: 저장된 프리셋(민감 필드 value='')을 실제 값이 채워진 형태로 변환
+async function resolvePreset(preset) {
+  if (!preset || !Array.isArray(preset.fields)) return preset;
+  const fields = [];
+  for (const f of preset.fields) {
+    if (f.sensitive) {
+      const secret = await getSecret(preset.id + ':' + f.id);
+      fields.push({ ...f, value: secret ?? '' });
+    } else {
+      fields.push({ ...f });
+    }
+  }
+  return { ...preset, fields };
+}
+
+async function resolvePresets(presets) {
+  const resolved = [];
+  for (const p of presets) resolved.push(await resolvePreset(p));
+  return resolved;
 }
 
 function escapeRegExp(s) {
@@ -212,7 +235,7 @@ async function handleStepTabLoaded(tabId) {
   if (runState.currentTabId !== tabId || !runState.currentStep) return;
 
   const stepInfo = runState.currentStep;
-  const preset = stepInfo.preset;
+  const preset = await resolvePreset(stepInfo.preset);
 
   let applyResult = { applied: [], failures: [] };
   try {
@@ -295,7 +318,7 @@ async function nextStep() {
 async function handleMessage(msg, sender) {
   switch (msg.type) {
     case 'PRESET_LIST': {
-      return getPresets();
+      return resolvePresets(await getPresets());
     }
     case 'PRESET_CREATE': {
       const presets = await getPresets();
@@ -317,15 +340,47 @@ async function handleMessage(msg, sender) {
       const presets = await getPresets();
       const idx = presets.findIndex((p) => p.id === msg.preset.id);
       if (idx === -1) throw new Error('프리셋을 찾을 수 없습니다.');
+      const prev = presets[idx];
       const updated = { ...msg.preset, updatedAt: Date.now() };
+      const incomingFields = Array.isArray(updated.fields) ? updated.fields : (prev.fields || []);
+      const prevSensitiveIds = new Set(
+        (prev.fields || []).filter((f) => f.sensitive).map((f) => f.id)
+      );
+      const newSensitiveIds = new Set();
+      const fields = [];
+      for (const f of incomingFields) {
+        const field = { ...f };
+        if (field.sensitive) {
+          newSensitiveIds.add(field.id);
+          const value = field.value ?? '';
+          if (value !== '') {
+            await setSecret(updated.id + ':' + field.id, value);
+          }
+          field.value = '';
+        }
+        fields.push(field);
+      }
+      // 민감 해제되거나 삭제된 필드의 암호문 정리
+      for (const fid of prevSensitiveIds) {
+        if (!newSensitiveIds.has(fid)) {
+          await deleteSecret(updated.id + ':' + fid);
+        }
+      }
+      updated.fields = fields;
       presets[idx] = updated;
       await savePresets(presets);
       return updated;
     }
     case 'PRESET_DELETE': {
       const presets = await getPresets();
+      const target = presets.find((p) => p.id === msg.id);
       const next = presets.filter((p) => p.id !== msg.id);
       await savePresets(next);
+      if (target && Array.isArray(target.fields)) {
+        for (const f of target.fields) {
+          if (f.sensitive) await deleteSecret(target.id + ':' + f.id);
+        }
+      }
       const groups = await getGroups();
       let changed = false;
       for (const g of groups) {
@@ -405,11 +460,24 @@ async function handleMessage(msg, sender) {
       const presets = await getPresets();
       const preset = presets.find((p) => p.id === msg.presetId);
       if (!preset) throw new Error('프리셋을 찾을 수 없습니다.');
-      const fieldIdx = preset.fields.findIndex((f) => f.selector === msg.field.selector);
+      const field = { ...msg.field };
+      if (field.sensitive) {
+        const value = field.value ?? '';
+        if (value !== '') {
+          await setSecret(preset.id + ':' + field.id, value);
+        }
+        field.value = '';
+      }
+      const fieldIdx = preset.fields.findIndex((f) => f.selector === field.selector);
+      const prevField = fieldIdx !== -1 ? preset.fields[fieldIdx] : null;
+      // 민감 해제된 기존 필드의 암호문 정리
+      if (prevField && prevField.sensitive && !field.sensitive) {
+        await deleteSecret(preset.id + ':' + prevField.id);
+      }
       if (fieldIdx === -1) {
-        preset.fields.push(msg.field);
+        preset.fields.push(field);
       } else {
-        preset.fields[fieldIdx] = msg.field;
+        preset.fields[fieldIdx] = field;
       }
       preset.updatedAt = Date.now();
       await savePresets(presets);
@@ -424,12 +492,14 @@ async function handleMessage(msg, sender) {
       if (!matchUrlPattern(preset.urlPattern, tab.url)) {
         throw new Error('현재 페이지가 프리셋 대상 사이트가 아닙니다.');
       }
-      const resp = await chrome.tabs.sendMessage(msg.tabId, { type: 'APPLY_PRESET', preset });
+      const resolved = await resolvePreset(preset);
+      const resp = await chrome.tabs.sendMessage(msg.tabId, { type: 'APPLY_PRESET', preset: resolved });
       return resp && resp.result;
     }
     case 'AUTO_APPLY_CHECK': {
       const presets = await getPresets();
-      return presets.filter((p) => p.autoApply && matchUrlPattern(p.urlPattern, msg.url));
+      const matching = presets.filter((p) => p.autoApply && matchUrlPattern(p.urlPattern, msg.url));
+      return resolvePresets(matching);
     }
     case 'GET_CURRENT_URL': {
       const tab = await chrome.tabs.get(msg.tabId);
@@ -437,7 +507,7 @@ async function handleMessage(msg, sender) {
     }
     case 'EXPORT_DATA': {
       return {
-        presets: await getPresets(),
+        presets: await resolvePresets(await getPresets()),
         groups: await getGroups()
       };
     }
@@ -454,6 +524,22 @@ async function handleMessage(msg, sender) {
         if (oldId) idMap.set(oldId, preset.id);
         preset.createdAt = preset.createdAt || now;
         preset.updatedAt = now;
+        // 민감 필드는 새 ID 기준으로 재암호화 저장
+        if (Array.isArray(preset.fields)) {
+          const fields = [];
+          for (const f of preset.fields) {
+            const field = { ...f };
+            if (field.sensitive) {
+              const value = field.value ?? '';
+              if (value !== '') {
+                await setSecret(preset.id + ':' + field.id, value);
+              }
+              field.value = '';
+            }
+            fields.push(field);
+          }
+          preset.fields = fields;
+        }
       }
 
       const groups = [];
@@ -488,7 +574,8 @@ async function applyAutoPreset(tabId, url) {
     const matching = presets.filter((p) => p.autoApply && matchUrlPattern(p.urlPattern, url));
     for (const preset of matching) {
       try {
-        await chrome.tabs.sendMessage(tabId, { type: 'APPLY_PRESET', preset });
+        const resolved = await resolvePreset(preset);
+        await chrome.tabs.sendMessage(tabId, { type: 'APPLY_PRESET', preset: resolved });
       } catch (e) {
         // 페이지가 아직 스크립트를 로드하지 않았으면 무시
       }
