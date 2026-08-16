@@ -150,8 +150,10 @@ async function main() {
     await form.bringToFront();
     await popup2.goto(`chrome-extension://${extId}/popup/popup.html`);
     await popup2.reload();
-    await popup2.waitForSelector('[data-act="record"]');
-    await popup2.click('[data-act="record"]');
+    await popup2.waitForSelector('.preset-card [data-menu-toggle]');
+    await popup2.click('.preset-card [data-menu-toggle]');
+    await popup2.waitForSelector('.preset-card [data-act="record"]');
+    await popup2.click('.preset-card [data-act="record"]');
     await sleep(400);
     await popup2.close().catch(() => {});
     await form.bringToFront();
