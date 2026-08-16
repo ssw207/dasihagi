@@ -1,8 +1,12 @@
 /**
- * 민감값 AES-256-GCM 암호화 통합 검증 스크립트
+ * 프리셋 전체 암호화(AES-256-GCM) 통합 검증 스크립트
  *
  * 브라우저 없이 mock chrome API로 실제 background.js(+secure-store.js)를 구동해
- * 민감 필드의 암호화 저장/복호화/재암호화/정리 동작을 검증한다.
+ * 프리셋별 전체 암호화(sec:preset:<id> blob) 저장/복호화/재암호화/정리/마이그레이션을 검증한다.
+ *
+ * 저장 모델: presets = 평문 인덱스 [{id,name,urlPattern,autoApply,updatedAt}]
+ *           sec:preset:<id> = 프리셋 전체(모든 필드 값) AES-256-GCM 암호화 blob
+ *           field.sensitive = 마스킹 표시 신호 (저장 보호와 무관)
  *
  * 실행: node --experimental-default-type=module test/encryption-verify.mjs
  *  (package.json에 "type":"module"이 없어 background.js가 CJS로 해석되는 문제를
@@ -93,9 +97,67 @@ globalThis.chrome = {
 };
 
 // ============================================================
-// 2. background.js 로드 (mock chrome을 전역에 설정한 뒤 import)
+// 2. 레거시(필드 단위 민감 암호화) 데이터 시드 — 마이그레이션 검증용
+//    (background.js import 시점에 migrateLegacyStorage가 실행됨)
 // ============================================================
 
+function toB64(buf) {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function fromB64(str) {
+  const bin = atob(str);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+async function seedLegacyData() {
+  // vault 키를 직접 생성해 시드 — secure-store가 이 키로 복호화하도록 함
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+  const raw = await crypto.subtle.exportKey('raw', key);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    new TextEncoder().encode('비밀값123')
+  );
+  const now = Date.now();
+  await storageLocal.set({
+    vault_key_v1: toB64(raw),
+    'sec:legacy-1:f1': { ct: toB64(ct), iv: toB64(iv) }, // 레거시 필드별 암호문
+    presets: [
+      {
+        id: 'legacy-1',
+        name: '레거시 프리셋',
+        urlPattern: 'example.com',
+        autoApply: false,
+        createdAt: now,
+        updatedAt: now,
+        fields: [
+          { id: 'f1', label: '비밀번호', selector: '#pwd', value: '', type: 'text', sensitive: true },
+          { id: 'f2', label: '이름', selector: '#name', value: '홍길동', type: 'text' },
+        ],
+      },
+    ],
+  });
+}
+
+async function waitFor(predicate, timeoutMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return predicate();
+}
+
+await seedLegacyData();
 await import('../background.js');
 
 if (!messageListener) {
@@ -106,10 +168,6 @@ if (!messageListener) {
 // 3. 메시지 전송 헬퍼
 // ============================================================
 
-/**
- * background.js의 listener는 sendResponse({ok, data}) 패턴이므로,
- * sendResponse가 호출될 때까지 기다렸다가 {ok, data} 형태로 반환한다.
- */
 function send(type, msg) {
   return new Promise((resolve, reject) => {
     let done = false;
@@ -125,7 +183,6 @@ function send(type, msg) {
       reject(e);
       return;
     }
-    // listener가 Promise를 반환하는 경우에도 처리
     if (ret && typeof ret.then === 'function') {
       ret
         .then((v) => {
@@ -144,7 +201,6 @@ function send(type, msg) {
   });
 }
 
-/** send 후 {ok:true, data}를 풀어 data만 반환. 실패 시 throw. */
 async function call(type, msg) {
   const resp = await send(type, msg);
   if (!resp || resp.ok !== true) {
@@ -161,10 +217,6 @@ function storageDump() {
 
 function jsonHas(storage, needle) {
   return JSON.stringify(storage).includes(needle);
-}
-
-function secKeysFor(presetId) {
-  return Object.keys(storageLocal.dump()).filter((k) => k.startsWith(`sec:${presetId}:`));
 }
 
 // ============================================================
@@ -185,16 +237,47 @@ async function scenario(name, fn) {
   }
 }
 
-async function createPreset(name, urlPattern) {
-  return call('PRESET_CREATE', { name, urlPattern });
+async function createPreset(name, urlPattern, extra = {}) {
+  return call('PRESET_CREATE', { name, urlPattern, ...extra });
 }
 
 async function saveSensitiveField(presetId, field) {
   return call('CAPTURE_SAVE_FIELD', { presetId, field });
 }
 
-// ---- S1: 민감 필드 저장 시 평문 미노출 ----
-await scenario('S1: 민감 필드 저장 시 평문 미노출', async () => {
+// ---- M1: 레거시 저장 데이터가 프리셋 blob으로 이전 ----
+await scenario('M1: 레거시 저장 데이터가 프리셋 blob으로 이전', async () => {
+  const migrated = await waitFor(() => {
+    const p = storageLocal.dump().presets;
+    return Array.isArray(p) && p.length > 0 && !Array.isArray(p[0].fields);
+  });
+  assert(migrated, '마이그레이션이 인덱스 형식으로 완료되어야 함');
+
+  const dump = storageLocal.dump();
+  const idx = dump.presets.find((p) => p.id === 'legacy-1');
+  assert(idx, '인덱스에 레거시 프리셋이 있어야 함');
+  assert.strictEqual(idx.name, '레거시 프리셋', '인덱스에 name 유지');
+  assert(!Array.isArray(idx.fields), '인덱스에 fields가 없어야 함 (평문 미노출)');
+
+  const blob = dump['sec:preset:legacy-1'];
+  assert(blob && typeof blob.ct === 'string' && typeof blob.iv === 'string', 'sec:preset:legacy-1 blob 생성');
+  assert(!dump['sec:legacy-1:f1'], '레거시 필드별 sec 키 정리');
+  assert(!jsonHas(dump, '비밀값123'), '저장소에 평문 비밀값123이 없어야 함');
+});
+
+// ---- M2: 이전 후 PRESET_LIST가 복호화 값 반환 ----
+await scenario('M2: 이전 후 PRESET_LIST가 복호화 값 반환', async () => {
+  const list = await call('PRESET_LIST', {});
+  const found = list.find((p) => p.id === 'legacy-1');
+  assert(found, '이전된 프리셋이 목록에 있어야 함');
+  const f1 = found.fields.find((f) => f.id === 'f1');
+  assert.strictEqual(f1.value, '비밀값123', '레거시 민감 값이 복호화되어야 함');
+  assert.strictEqual(f1.sensitive, true, 'sensitive(마스킹 신호) 유지');
+  assert.strictEqual(found.fields.find((f) => f.id === 'f2').value, '홍길동', '비민감 값 유지');
+});
+
+// ---- S1: 민감 필드 저장 시 평문 미노출 (프리셋 blob) ----
+await scenario('S1: 민감 필드 저장 시 평문 미노출 (프리셋 blob)', async () => {
   const preset = await createPreset('S1 프리셋', 'example.com');
   await saveSensitiveField(preset.id, {
     id: 'f1',
@@ -206,20 +289,17 @@ await scenario('S1: 민감 필드 저장 시 평문 미노출', async () => {
   });
 
   const dump = storageDump();
-  const saved = dump.presets.find((p) => p.id === preset.id);
-  assert(saved, '프리셋이 저장되어 있어야 함');
-  const field = saved.fields.find((f) => f.id === 'f1');
-  assert(field, '필드 f1이 저장되어 있어야 함');
-  assert.strictEqual(field.value, '', '민감 필드 value는 빈 문자열이어야 함');
-  assert.strictEqual(field.sensitive, true, '민감 필드 sensitive=true 유지');
+  const idx = dump.presets.find((p) => p.id === preset.id);
+  assert(idx, '인덱스에 프리셋이 있어야 함');
+  assert(!Array.isArray(idx.fields), '인덱스에 fields가 없어야 함 (평문 미노출)');
   assert(!jsonHas(dump, 'secret123'), 'storage 전체에 평문 secret123이 없어야 함');
 
-  const sec = dump[`sec:${preset.id}:f1`];
-  assert(sec && typeof sec.ct === 'string' && typeof sec.iv === 'string', 'sec: 키에 {ct, iv} 구조가 있어야 함');
+  const blob = dump['sec:preset:' + preset.id];
+  assert(blob && typeof blob.ct === 'string' && typeof blob.iv === 'string', 'sec:preset:<id> blob {ct, iv} 구조');
 });
 
-// ---- S2: 비민감 필드는 평문 유지 ----
-await scenario('S2: 비민감 필드는 평문 유지', async () => {
+// ---- S2: 비민감 필드도 전체 암호화로 보호 ----
+await scenario('S2: 비민감 필드도 전체 암호화로 보호', async () => {
   const preset = await createPreset('S2 프리셋', 'example.com');
   await saveSensitiveField(preset.id, {
     id: 'f2',
@@ -230,10 +310,8 @@ await scenario('S2: 비민감 필드는 평문 유지', async () => {
   });
 
   const dump = storageDump();
-  const saved = dump.presets.find((p) => p.id === preset.id);
-  const field = saved.fields.find((f) => f.id === 'f2');
-  assert.strictEqual(field.value, 'plain123', '비민감 필드는 평문 그대로 저장');
-  assert(jsonHas(dump, 'plain123'), 'storage JSON에 plain123이 존재해야 함');
+  assert(!jsonHas(dump, 'plain123'), '비민감 필드도 프리셋 전체 암호화로 평문 미노출');
+  assert(dump['sec:preset:' + preset.id], 'blob 존재');
 });
 
 // ---- S3: PRESET_LIST 복호화 ----
@@ -291,7 +369,7 @@ await scenario('S5: PRESET_UPDATE 재암호화', async () => {
     type: 'text',
     sensitive: true,
   });
-  const oldSec = storageDump()[`sec:${preset.id}:f1`];
+  const oldBlob = storageDump()['sec:preset:' + preset.id];
 
   await call('PRESET_UPDATE', {
     preset: {
@@ -306,19 +384,19 @@ await scenario('S5: PRESET_UPDATE 재암호화', async () => {
 
   const dump = storageDump();
   assert(!jsonHas(dump, 'newsecret456'), 'storage 전체에 평문 newsecret456이 없어야 함');
-  const newSec = dump[`sec:${preset.id}:f1`];
-  assert(newSec && typeof newSec.ct === 'string', 'sec: 키에 새 암호문이 존재해야 함');
-  assert.notStrictEqual(newSec.ct, oldSec.ct, '암호문이 새 값으로 재암호화되어야 함');
-  const saved = dump.presets.find((p) => p.id === preset.id);
-  assert.strictEqual(saved.fields.find((f) => f.id === 'f1').value, '', '필드 value는 빈 문자열 유지');
+  const newBlob = dump['sec:preset:' + preset.id];
+  assert(newBlob && typeof newBlob.ct === 'string', 'blob에 새 암호문이 존재해야 함');
+  assert.notStrictEqual(newBlob.ct, oldBlob.ct, '암호문이 새 값으로 재암호화되어야 함');
+  const idx = dump.presets.find((p) => p.id === preset.id);
+  assert(!Array.isArray(idx.fields), '인덱스에 fields가 없어야 함');
 
   const list = await call('PRESET_LIST', {});
   const found = list.find((p) => p.id === preset.id);
   assert.strictEqual(found.fields.find((f) => f.id === 'f1').value, 'newsecret456', 'PRESET_LIST로 새 값 복호화 확인');
 });
 
-// ---- S6: 민감 해제 시 암호문 정리 ----
-await scenario('S6: 민감 해제 시 암호문 정리', async () => {
+// ---- S6: sensitive는 마스킹 신호로 보존 (저장 구조 불변) ----
+await scenario('S6: sensitive는 마스킹 신호로 보존 (저장 구조 불변)', async () => {
   const preset = await createPreset('S6 프리셋', 'example.com');
   await saveSensitiveField(preset.id, {
     id: 'f1',
@@ -329,6 +407,7 @@ await scenario('S6: 민감 해제 시 암호문 정리', async () => {
     sensitive: true,
   });
 
+  // 민감 해제(마스킹 해제)해도 저장 구조는 불변 — 값은 blob 안에 유지
   await call('PRESET_UPDATE', {
     preset: {
       id: preset.id,
@@ -341,13 +420,18 @@ await scenario('S6: 민감 해제 시 암호문 정리', async () => {
   });
 
   const dump = storageDump();
-  assert(!dump[`sec:${preset.id}:f1`], '민감 해제 시 sec: 키가 삭제되어야 함');
-  const saved = dump.presets.find((p) => p.id === preset.id);
-  assert.strictEqual(saved.fields.find((f) => f.id === 'f1').value, 'nowplain', '평문으로 저장되어야 함');
+  assert(dump['sec:preset:' + preset.id], '민감 해제와 무관하게 blob 유지');
+  assert(!jsonHas(dump, 'nowplain'), '평문 미노출 유지 (비민감 값도 blob 안)');
+
+  const list = await call('PRESET_LIST', {});
+  const found = list.find((p) => p.id === preset.id);
+  const f1 = found.fields.find((f) => f.id === 'f1');
+  assert.strictEqual(f1.sensitive, false, 'sensitive=false 보존 (마스킹 해제 신호)');
+  assert.strictEqual(f1.value, 'nowplain', '값 반환');
 });
 
-// ---- S7: PRESET_DELETE 암호문 정리 ----
-await scenario('S7: PRESET_DELETE 암호문 정리', async () => {
+// ---- S7: PRESET_DELETE 시 blob + 인덱스 정리 ----
+await scenario('S7: PRESET_DELETE 시 blob + 인덱스 정리', async () => {
   const preset = await createPreset('S7 프리셋', 'example.com');
   await saveSensitiveField(preset.id, {
     id: 'f1',
@@ -365,14 +449,16 @@ await scenario('S7: PRESET_DELETE 암호문 정리', async () => {
     type: 'text',
     sensitive: true,
   });
-  assert.strictEqual(secKeysFor(preset.id).length, 2, '삭제 전 sec: 키 2개 존재');
+  assert(storageDump()['sec:preset:' + preset.id], '삭제 전 blob 존재');
 
   await call('PRESET_DELETE', { id: preset.id });
-  assert.strictEqual(secKeysFor(preset.id).length, 0, '삭제 후 해당 프리셋의 sec: 키가 전부 제거되어야 함');
+  const dump = storageDump();
+  assert(!dump['sec:preset:' + preset.id], '삭제 후 blob 제거되어야 함');
+  assert(!dump.presets.find((p) => p.id === preset.id), '삭제 후 인덱스 항목 제거되어야 함');
 });
 
-// ---- S8: IMPORT_DATA 재암호화 ----
-await scenario('S8: IMPORT_DATA 재암호화', async () => {
+// ---- S8: IMPORT_DATA 전체 암호화 ----
+await scenario('S8: IMPORT_DATA 전체 암호화', async () => {
   const importData = {
     schemaVersion: 1,
     presets: [
@@ -392,14 +478,14 @@ await scenario('S8: IMPORT_DATA 재암호화', async () => {
 
   const dump = storageDump();
   assert(!jsonHas(dump, 'imported123'), 'storage 전체에 평문 imported123이 없어야 함');
-  const imported = dump.presets.find((p) => p.name === 'S8 임포트 프리셋');
-  assert(imported, '임포트된 프리셋이 저장되어야 함');
-  assert.notStrictEqual(imported.id, 'old-id-1', '새 id가 부여되어야 함');
-  const sec = dump[`sec:${imported.id}:f1`];
-  assert(sec && typeof sec.ct === 'string', '새 id 기준 sec: 키가 존재해야 함');
+  const idx = dump.presets.find((p) => p.name === 'S8 임포트 프리셋');
+  assert(idx, '인덱스에 임포트 프리셋이 있어야 함');
+  assert.notStrictEqual(idx.id, 'old-id-1', '새 id가 부여되어야 함');
+  assert(!Array.isArray(idx.fields), '인덱스에 fields가 없어야 함');
+  assert(dump['sec:preset:' + idx.id], '새 id 기준 blob이 존재해야 함');
 
   const list = await call('PRESET_LIST', {});
-  const found = list.find((p) => p.id === imported.id);
+  const found = list.find((p) => p.id === idx.id);
   assert.strictEqual(found.fields.find((f) => f.id === 'f1').value, 'imported123', 'PRESET_LIST로 복호화 확인');
 });
 
@@ -419,6 +505,27 @@ await scenario('S9: EXPORT_DATA 복호화', async () => {
   const found = exported.presets.find((p) => p.id === preset.id);
   assert(found, 'EXPORT_DATA에 프리셋이 있어야 함');
   assert.strictEqual(found.fields.find((f) => f.id === 'f1').value, 'secret123', '백업 데이터에 복호화된 평문 값 포함');
+});
+
+// ---- S10: AUTO_APPLY_CHECK 인덱스 매칭 + 복호화 ----
+await scenario('S10: AUTO_APPLY_CHECK 인덱스 매칭 + 복호화', async () => {
+  const preset = await createPreset('S10 자동적용', 'example.com', { autoApply: true });
+  await saveSensitiveField(preset.id, {
+    id: 'f1',
+    label: '비밀번호',
+    selector: '#pwd',
+    value: 'secret123',
+    type: 'text',
+    sensitive: true,
+  });
+
+  const matched = await call('AUTO_APPLY_CHECK', { url: 'https://example.com/form' });
+  const found = matched.find((p) => p.id === preset.id);
+  assert(found, '자동 적용 매칭 프리셋이 포함되어야 함');
+  assert.strictEqual(found.fields.find((f) => f.id === 'f1').value, 'secret123', '복호화된 값 반환');
+
+  const none = await call('AUTO_APPLY_CHECK', { url: 'https://other.com/form' });
+  assert.strictEqual(none.length, 0, '비매칭 URL이면 빈 배열');
 });
 
 // ============================================================

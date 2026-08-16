@@ -103,7 +103,8 @@
   function hostMatchesPattern(pattern) {
     if (!pattern) return false;
     const p = String(pattern).trim().toLowerCase().replace(/^[a-z]+:\/\//, '');
-    const hostPart = p.split('/')[0];
+    // 패턴에 포트(:port)가 포함되면 currentHost(포트 없음)와 비교가 무력화됨 — E2E에서 발견
+    const hostPart = p.split('/')[0].replace(/\[([^\]]+)\].*/, '$1').replace(/:\d+$/, '');
     if (hostPart.startsWith('*.')) {
       const base = hostPart.slice(2);
       return currentHost === base || currentHost.endsWith('.' + base);
@@ -198,8 +199,8 @@
         '<div class="preset-meta">' + escapeHtml(preset.urlPattern || '(패턴 없음)') + ' · 필드 ' + preset.fields.length + '개</div>' +
         buildFieldCopyRows(preset.fields) +
         '<div class="preset-actions">' +
-        '<button class="btn btn-primary" data-act="apply" data-id="' + preset.id + '">적용</button>' +
-        '<button class="btn" data-act="capture" data-id="' + preset.id + '">캡처</button>' +
+        '<button class="btn btn-primary" data-act="replay" data-id="' + preset.id + '">재생</button>' +
+        '<button class="btn" data-act="record" data-id="' + preset.id + '">녹화</button>' +
         '<button class="btn" data-act="edit" data-id="' + preset.id + '">편집</button>' +
         '<button class="btn" data-act="delete" data-id="' + preset.id + '">삭제</button>' +
         '</div>';
@@ -267,16 +268,16 @@
   }
 
   async function handlePresetAction(act, preset) {
-    if (act === 'apply') {
+    if (act === 'apply' || act === 'replay') {
       const resp = await sendMessage({ type: 'APPLY_PRESET', presetId: preset.id, tabId: currentTabId });
       if (!resp.ok) {
-        showToast('적용 실패: ' + resp.error);
+        showToast('재생 실패: ' + resp.error);
         return;
       }
       const result = resp.data || {};
       const failed = (result.failures || []).length;
       const applied = (result.applied || []).length;
-      showToast('적용 완료: ' + applied + '개, 실패: ' + failed + '개');
+      showToast('재생 완료: ' + applied + '개, 실패: ' + failed + '개');
     } else if (act === 'capture') {
       const resp = await sendMessage({ type: 'CAPTURE_START', tabId: currentTabId, presetId: preset.id });
       if (!resp.ok) {
@@ -284,6 +285,14 @@
         return;
       }
       showToast('캡처 모드 시작! 페이지에서 입력란을 클릭하세요.');
+      window.close();
+    } else if (act === 'record') {
+      const resp = await sendMessage({ type: 'RECORD_START', tabId: currentTabId, presetId: preset.id });
+      if (!resp.ok) {
+        showToast('녹화 실패: ' + resp.error);
+        return;
+      }
+      showToast('녹화 시작! 페이지에서 폼을 평소대로 입력한 뒤 [종료] 버튼을 누르세요.');
       window.close();
     } else if (act === 'edit') {
       openEditor(preset);
@@ -344,6 +353,7 @@
     $('#ed-autoapply').checked = !!editingPreset.autoApply;
     $('#btn-delete-preset').style.display = preset ? '' : 'none';
     $('#btn-capture').disabled = !preset;
+    $('#btn-record').disabled = !preset;
     renderFields();
   }
 
@@ -643,6 +653,7 @@
     showToast('저장되었습니다.');
     renderFields();
     $('#btn-capture').disabled = false;
+    $('#btn-record').disabled = false;
   });
 
   $('#btn-delete-preset').addEventListener('click', async () => {
@@ -665,6 +676,17 @@
       return;
     }
     showToast('캡처 모드 시작! 페이지에서 입력란을 클릭하세요.');
+    window.close();
+  });
+
+  $('#btn-record').addEventListener('click', async () => {
+    if (!editingPreset || !editingPreset.id) return;
+    const resp = await sendMessage({ type: 'RECORD_START', tabId: currentTabId, presetId: editingPreset.id });
+    if (!resp.ok) {
+      showToast('녹화 실패: ' + resp.error);
+      return;
+    }
+    showToast('녹화 시작! 페이지에서 폼을 평소대로 입력한 뒤 [종료] 버튼을 누르세요.');
     window.close();
   });
 

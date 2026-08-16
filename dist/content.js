@@ -1,10 +1,12 @@
 (() => {
   const capture = { active: false, presetId: null };
+  const record = { active: false, presetId: null, events: [], lastRecordAt: 0, debounceTimer: null, pending: null };
   let styleEl = null;
   let panelEl = null;
   let panelTarget = null;
   let highlightObserver = null;
   let applyAbort = null;
+  let recordChipEl = null;
 
   function injectStyles() {
     if (styleEl) return;
@@ -28,7 +30,14 @@
       '.fp-panel .fp-status{font-size:12px !important;font-weight:600 !important;text-align:center !important;margin-top:10px !important;color:#059669 !important}',
       '.fp-panel .fp-hint{font-size:11px !important;color:#6b7280 !important;margin-top:8px !important;line-height:1.4 !important}',
       '.fp-panel .fp-chip{display:inline-block !important;max-width:100% !important;overflow:hidden !important;text-overflow:ellipsis !important;white-space:nowrap !important;font-size:11px !important;color:#1d4ed8 !important;background:#dbeafe !important;border-radius:4px !important;padding:2px 6px !important;margin-top:4px !important}',
-      '.fp-apply-flash{outline:2px solid #10b981 !important;outline-offset:2px !important;transition:outline-color .8s ease !important}'
+      '.fp-apply-flash{outline:2px solid #10b981 !important;outline-offset:2px !important;transition:outline-color .8s ease !important}',
+      '.fp-record-chip{position:fixed !important;top:16px !important;left:50% !important;transform:translateX(-50%) !important;z-index:2147483647 !important;display:flex !important;align-items:center !important;gap:10px !important;background:#111 !important;color:#fff !important;border-radius:8px !important;padding:8px 14px !important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;font-size:13px !important;font-weight:600 !important;box-shadow:0 4px 16px rgba(0,0,0,.3) !important;box-sizing:border-box !important}',
+      '.fp-record-chip *{box-sizing:border-box !important;margin:0 !important}',
+      '.fp-record-chip .fp-record-dot{width:10px !important;height:10px !important;border-radius:50% !important;background:#ef4444 !important;animation:fp-blink 1s infinite !important;flex:none !important}',
+      '.fp-record-chip button{background:#ef4444 !important;color:#fff !important;border:none !important;border-radius:6px !important;padding:4px 12px !important;font-size:12px !important;font-weight:600 !important;cursor:pointer !important}',
+      '.fp-record-chip button:hover{background:#dc2626 !important}',
+      '.fp-record-chip.fp-record-done{background:#059669 !important}',
+      '@keyframes fp-blink{50%{opacity:.3}}'
     ].join('\n');
     (document.head || document.documentElement).appendChild(styleEl);
   }
@@ -204,7 +213,7 @@
     }
 
     const sensitiveHtml =
-      '<label class="fp-check"><input type="checkbox" id="fp-sensitive"><span>민감 값 (암호화 저장)</span></label>';
+      '<label class="fp-check"><input type="checkbox" id="fp-sensitive"><span>민감 값 (목록에서 마스킹 표시)</span></label>';
 
     panelEl.innerHTML =
       '<h3>필드 저장</h3>' +
@@ -223,6 +232,11 @@
     const valueRow = panelEl.querySelector('#fp-value-row');
     const valueInput = panelEl.querySelector('#fp-value');
     const sensitiveInput = panelEl.querySelector('#fp-sensitive');
+
+    // 개인정보 자동 감지 (type=password / autocomplete / 메타데이터 키워드) → 민감 체크박스 기본 체크
+    if (window.PiiDetect && window.PiiDetect.isSensitive(el, isBoolean ? String(el.checked) : el.value)) {
+      sensitiveInput.checked = true;
+    }
 
     function isImeComposing(e) {
       return e.isComposing || e.keyCode === 229;
@@ -244,7 +258,12 @@
           : valueInput.value,
         type: type
       };
-      if (sensitiveInput.checked) field.sensitive = true;
+      if (
+        sensitiveInput.checked ||
+        (window.PiiDetect && window.PiiDetect.isSensitive(el, field.value))
+      ) {
+        field.sensitive = true;
+      }
       if (!isBoolean && !field.value) {
         showStatus('값을 입력해주세요.', true);
         return;
@@ -332,6 +351,205 @@
     document.querySelectorAll('.fp-capture-input').forEach((el) => el.classList.remove('fp-capture-input'));
   }
 
+  // ---------- 녹화 모드 (행동 기록) ----------
+
+  const RECORD_MAX_DELAY = 5000;
+
+  function showRecordChip() {
+    if (recordChipEl) return;
+    recordChipEl = document.createElement('div');
+    recordChipEl.className = 'fp-record-chip';
+    recordChipEl.innerHTML =
+      '<span class="fp-record-dot"></span>' +
+      '<span id="fp-record-label">녹화 중 · 0개</span>' +
+      '<button id="fp-record-stop">종료</button>';
+    document.body.appendChild(recordChipEl);
+    recordChipEl.querySelector('#fp-record-stop').addEventListener('click', () => stopRecordingMode());
+  }
+
+  function updateRecordChip() {
+    if (!recordChipEl) return;
+    const label = recordChipEl.querySelector('#fp-record-label');
+    if (label) label.textContent = '녹화 중 · ' + record.events.length + '개';
+  }
+
+  function hideRecordChip() {
+    if (recordChipEl) {
+      recordChipEl.remove();
+      recordChipEl = null;
+    }
+  }
+
+  function showRecordToast(text) {
+    const toast = document.createElement('div');
+    toast.className = 'fp-record-chip fp-record-done';
+    toast.innerHTML = '<span>' + escapeHtml(text) + '</span>';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2200);
+  }
+
+  function recordEvent(el, type, value) {
+    const now = Date.now();
+    const delay = record.lastRecordAt ? Math.min(now - record.lastRecordAt, RECORD_MAX_DELAY) : 0;
+    record.lastRecordAt = now;
+    const field = {
+      id: crypto.randomUUID(),
+      label: detectFieldLabel(el),
+      selector: generateSelector(el),
+      value: String(value),
+      type: type,
+      delay: delay
+    };
+    // 개인정보 자동 감지 (메타데이터 + 값 정규식) → 민감 필드로 자동 암호화
+    if (window.PiiDetect && window.PiiDetect.isSensitive(el, field.value)) {
+      field.sensitive = true;
+    }
+    const last = record.events[record.events.length - 1];
+    // 같은 필드를 연속 수정하면 새 행동을 추가하지 않고 마지막 값만 갱신
+    if (last && last.selector === field.selector && last.type === field.type) {
+      last.value = field.value;
+    } else {
+      record.events.push(field);
+    }
+    updateRecordChip();
+  }
+
+  function flushPendingRecord() {
+    if (!record.active || !record.pending) return;
+    const pending = record.pending;
+    record.pending = null;
+    recordEvent(pending.el, pending.type, pending.el.value);
+  }
+
+  function onRecordInput(e) {
+    if (!record.active) return;
+    const el = e.target;
+    if (!(el instanceof Element) || !isFormField(el)) return;
+    const type = detectFieldType(el);
+    if (type === 'select' || type === 'checkbox' || type === 'radio') return;
+    // 다른 필드로 이동하면 이전 필드의 대기 입력을 즉시 확정 (값 유실 방지)
+    if (record.pending && record.pending.el !== el) {
+      flushPendingRecord();
+    }
+    record.pending = { el, type };
+    clearTimeout(record.debounceTimer);
+    record.debounceTimer = setTimeout(flushPendingRecord, 400);
+  }
+
+  function onRecordChange(e) {
+    if (!record.active) return;
+    const el = e.target;
+    if (!(el instanceof Element) || !isFormField(el)) return;
+    const type = detectFieldType(el);
+    if (type !== 'select' && type !== 'checkbox' && type !== 'radio') return;
+    // 다른 필드의 대기 중인 텍스트 입력을 먼저 확정 (입력 → 선택 순서 보존)
+    if (record.pending && record.pending.el !== el) {
+      flushPendingRecord();
+    }
+    const value = type === 'checkbox' || type === 'radio' ? String(el.checked) : el.value;
+    recordEvent(el, type, value);
+  }
+
+  function startRecordingMode(presetId) {
+    record.active = true;
+    record.presetId = presetId;
+    record.events = [];
+    record.lastRecordAt = 0;
+    record.pending = null;
+    injectStyles();
+    showRecordChip();
+    document.addEventListener('input', onRecordInput, true);
+    document.addEventListener('change', onRecordChange, true);
+  }
+
+  function stopRecordingMode() {
+    if (!record.active) return;
+    clearTimeout(record.debounceTimer);
+    flushPendingRecord();
+    record.active = false;
+    hideRecordChip();
+    document.removeEventListener('input', onRecordInput, true);
+    document.removeEventListener('change', onRecordChange, true);
+    const presetId = record.presetId;
+    const events = record.events.slice();
+    record.presetId = null;
+    record.events = [];
+    record.lastRecordAt = 0;
+    if (events.length === 0) {
+      showRecordToast('기록된 입력이 없습니다.');
+      return;
+    }
+    chrome.runtime.sendMessage({ type: 'RECORD_SAVE', presetId, events }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !resp.ok) {
+        showRecordToast('저장 실패: ' + (resp && resp.error ? resp.error : '알 수 없는 오류'));
+        return;
+      }
+      showRecordToast('저장 완료! ' + events.length + '개 입력이 기록되었습니다.');
+    });
+  }
+
+  // ---------- 순차 재생 (녹화된 행동을 타이밍대로 재생) ----------
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function waitForElement(selector, timeoutMs) {
+    return new Promise((resolve) => {
+      let found = null;
+      try {
+        found = document.querySelector(selector);
+      } catch (e) {
+        resolve(null);
+        return;
+      }
+      if (found) {
+        resolve(found);
+        return;
+      }
+      const start = Date.now();
+      const timer = setInterval(() => {
+        let el = null;
+        try {
+          el = document.querySelector(selector);
+        } catch (e) {
+          el = null;
+        }
+        if (el) {
+          clearInterval(timer);
+          resolve(el);
+        } else if (Date.now() - start > timeoutMs) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, 100);
+    });
+  }
+
+  async function replaySequential(preset) {
+    const fields = Array.isArray(preset.fields) ? preset.fields : [];
+    const applied = [];
+    const failures = [];
+    for (const field of fields) {
+      const delay = Number.isFinite(field.delay) ? Math.min(Math.max(field.delay, 0), RECORD_MAX_DELAY) : 150;
+      await sleep(delay);
+      const el = await waitForElement(field.selector, 5000);
+      if (!el) {
+        failures.push({ ok: false, label: field.label, reason: '요소를 찾을 수 없음' });
+        continue;
+      }
+      const res = applyField(field);
+      if (res.ok) {
+        applied.push(res);
+        el.classList.add('fp-apply-flash');
+        setTimeout(() => el.classList.remove('fp-apply-flash'), 1200);
+      } else {
+        failures.push(res);
+      }
+    }
+    return { applied, failures };
+  }
+
   function setNativeValue(el, value) {
     const proto =
       el instanceof HTMLTextAreaElement
@@ -400,6 +618,10 @@
       applyAbort.observer.disconnect();
       applyAbort = null;
     }
+
+    // 녹화된 필드(delay 포함)는 순차 재생 — 기록된 순서와 타이밍대로 적용
+    const hasDelay = Array.isArray(preset.fields) && preset.fields.some((f) => Number.isFinite(f.delay));
+    if (hasDelay) return replaySequential(preset);
 
     return new Promise((resolve) => {
       const failures = [];
@@ -503,6 +725,16 @@
     }
     if (msg.type === 'CAPTURE_STOP') {
       stopCaptureMode();
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (msg.type === 'RECORD_START') {
+      startRecordingMode(msg.presetId);
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (msg.type === 'RECORD_STOP') {
+      stopRecordingMode();
       sendResponse({ ok: true });
       return false;
     }

@@ -15,7 +15,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["pii-detect.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
