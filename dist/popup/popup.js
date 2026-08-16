@@ -32,6 +32,37 @@
     toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2500);
   }
 
+  async function copyToClipboard(text, isSensitive) {
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch (e) {
+      ok = false;
+    }
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (e) {
+        ok = false;
+      }
+    }
+    if (ok) {
+      showToast(isSensitive ? '민감 값이 복사되었습니다.' : '복사되었습니다.');
+    } else {
+      showToast('복사 실패: 클립보드 접근이 차단되었습니다.');
+    }
+  }
+
   function sendMessage(msg) {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(msg, (resp) => {
@@ -102,6 +133,50 @@
   $('#tab-presets').addEventListener('click', () => switchTab('presets'));
   $('#tab-groups').addEventListener('click', () => switchTab('groups'));
 
+  function buildFieldCopyRows(fields) {
+    if (!fields || fields.length === 0) return '';
+    const MAX_VISIBLE = 5;
+    const rows = fields.map((field, idx) => {
+      const isBoolean = field.type === 'checkbox' || field.type === 'radio';
+      const isSensitive = !!field.sensitive;
+      let displayValue;
+      let copyValue;
+      if (isBoolean) {
+        const checked = field.value === 'true';
+        displayValue = checked ? '체크됨' : '체크 안 됨';
+        copyValue = checked ? 'true' : 'false';
+      } else if (field.value === '' || field.value == null) {
+        displayValue = '(값 없음)';
+        copyValue = '';
+      } else {
+        displayValue = isSensitive ? '••••••' : String(field.value);
+        copyValue = String(field.value);
+      }
+      const copyBtn =
+        copyValue === ''
+          ? '<button class="field-copy-btn" disabled title="복사할 값이 없습니다">📋</button>'
+          : '<button class="field-copy-btn" data-copy-idx="' + idx + '" title="값 복사">📋</button>';
+      return (
+        '<div class="field-copy-row">' +
+        '<span class="field-copy-label">' + escapeHtml(field.label) + '</span>' +
+        '<span class="field-copy-value' + (isSensitive ? ' is-sensitive' : '') + '">' + escapeHtml(displayValue) + '</span>' +
+        copyBtn +
+        '</div>'
+      );
+    });
+
+    const visible = rows.slice(0, MAX_VISIBLE).join('');
+    const hidden = rows.slice(MAX_VISIBLE);
+    let html = '<div class="field-copy-list">' + visible;
+    if (hidden.length > 0) {
+      html +=
+        '<div class="field-copy-more hidden" data-more-fields>' + hidden.join('') + '</div>' +
+        '<button class="field-copy-toggle" data-toggle-fields>' + hidden.length + '개 더보기</button>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   function renderList() {
     presetList.innerHTML = '';
     emptyState.classList.toggle('hidden', presets.length > 0);
@@ -121,6 +196,7 @@
         '<div class="preset-badges">' + badges.join('') + '</div>' +
         '</div>' +
         '<div class="preset-meta">' + escapeHtml(preset.urlPattern || '(패턴 없음)') + ' · 필드 ' + preset.fields.length + '개</div>' +
+        buildFieldCopyRows(preset.fields) +
         '<div class="preset-actions">' +
         '<button class="btn btn-primary" data-act="apply" data-id="' + preset.id + '">적용</button>' +
         '<button class="btn" data-act="capture" data-id="' + preset.id + '">캡처</button>' +
@@ -131,6 +207,26 @@
       card.querySelectorAll('button').forEach((btn) => {
         btn.addEventListener('click', () => handlePresetAction(btn.dataset.act, preset));
       });
+      card.querySelectorAll('[data-copy-idx]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.copyIdx);
+          const field = preset.fields[idx];
+          if (!field) return;
+          const isBoolean = field.type === 'checkbox' || field.type === 'radio';
+          const value = isBoolean ? (field.value === 'true' ? 'true' : 'false') : String(field.value || '');
+          copyToClipboard(value, !!field.sensitive);
+        });
+      });
+      const toggleBtn = card.querySelector('[data-toggle-fields]');
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+          const more = card.querySelector('[data-more-fields]');
+          const isCollapsed = more.classList.toggle('hidden');
+          toggleBtn.textContent = isCollapsed
+            ? more.querySelectorAll('.field-copy-row').length + '개 더보기'
+            : '접기';
+        });
+      }
       presetList.appendChild(card);
     }
   }
@@ -271,6 +367,9 @@
         (isBoolean
           ? '<input type="text" value="' + (field.value === 'true' ? '체크됨' : '체크 안 됨') + '" disabled>'
           : '<input type="' + (isSensitive ? 'password' : 'text') + '" data-idx="' + idx + '" value="' + escapeHtml(field.value) + '" data-value-edit>') +
+        (isBoolean
+          ? ''
+          : '<button class="field-copy-btn" data-edit-copy="' + idx + '" title="값 복사"' + (field.value === '' ? ' disabled' : '') + '>📋</button>') +
         '<label class="field-sensitive"><input type="checkbox" data-sensitive="' + idx + '"' + (isSensitive ? ' checked' : '') + '>민감</label>' +
         '<button class="field-del" data-del="' + idx + '" title="삭제">✕</button>' +
         '</div>';
@@ -286,6 +385,14 @@
           if (input) input.type = e.target.checked ? 'password' : 'text';
         });
       }
+      const editCopyBtn = item.querySelector('[data-edit-copy]');
+      if (editCopyBtn) {
+        editCopyBtn.addEventListener('click', () => {
+          const f = editingPreset.fields[idx];
+          if (!f) return;
+          copyToClipboard(String(f.value || ''), !!f.sensitive);
+        });
+      }
       fieldsList.appendChild(item);
     });
   }
@@ -295,6 +402,8 @@
     const idx = Number(e.target.dataset.idx);
     if (Number.isInteger(idx) && editingPreset.fields[idx]) {
       editingPreset.fields[idx].value = e.target.value;
+      const copyBtn = fieldsList.querySelector('[data-edit-copy="' + idx + '"]');
+      if (copyBtn) copyBtn.disabled = e.target.value === '';
     }
   });
 

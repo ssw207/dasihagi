@@ -301,6 +301,90 @@ body {
   font-size: 12px;
 }
 
+.field-copy-list {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.field-copy-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.field-copy-row + .field-copy-row {
+  border-top: 1px solid #f3f4f6;
+}
+
+.field-copy-label {
+  flex-shrink: 0;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: #4b5563;
+}
+
+.field-copy-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: #374151;
+}
+
+.field-copy-value.is-sensitive {
+  letter-spacing: 2px;
+}
+
+.field-copy-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.field-copy-btn:hover:not(:disabled) {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.field-copy-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.field-copy-toggle {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  color: #3b82f6;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 0;
+  cursor: pointer;
+}
+
+.field-copy-toggle:hover {
+  background: #f3f4f6;
+}
+
 .field-sensitive {
   display: flex;
   align-items: center;
