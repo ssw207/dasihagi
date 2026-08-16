@@ -1,4 +1,4 @@
-/* E2E 테스트: 폼 프리셋 Chrome Extension — 그룹(여러 페이지 복합 세팅) 실행 기능 */
+/* E2E 테스트: 다시하기 Chrome Extension — 그룹(여러 페이지 복합 세팅) 실행 기능 */
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');

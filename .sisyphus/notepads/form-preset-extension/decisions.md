@@ -1,5 +1,8 @@
 # Decisions
 
+## [2026-08-16] 제품명 다시하기
+- **D33**: 사용자("form-preset이 안 맞음… 브라우저 자동화에 가깝지 않나?" → 추천대로 진행). 표시 이름 **다시하기**, 패키지/저장소 **dasihagi**. 매크로·자동화라는 말은 쓰지 않음. 내보내기 `appId`는 `dasihagi`, 가져오기는 예전 `form-preset-extension`도 허용. 메타프롬프트: `메타-프롬프트-제품명-다시하기.md`.
+
 ## [2026-08-16] iframe 안 폼
 - **D32**: 사용자 질문("사내 어드민이 iframe… iframe은 안되?"). 이전에는 content script가 top만이라 iframe 입력이 안 붙었다. `all_frames` + `webNavigation.getAllFrames`로 모든 프레임에 녹화/적용. 교차 origin은 각 프레임의 content script가 처리(부모에서 iframe DOM 접근 없음). 칩은 top 또는 큰 iframe만. 메타프롬프트: `메타-프롬프트-iframe-지원.md`.
 

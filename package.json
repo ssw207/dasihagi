@@ -1,8 +1,8 @@
 {
-  "name": "form-preset-extension",
+  "name": "dasihagi",
   "private": true,
   "version": "0.1.0",
-  "description": "사이트별 폼 자동 세팅 프리셋 Chrome Extension",
+  "description": "다시하기 — 브라우저에서 한 일을 녹화하고 재생하는 Chrome 확장",
   "scripts": {
     "check": "node --check background.js && node --check content.js && node --check pii-detect.js && node --check secure-store.js && node --check popup/popup.js && node -e \"JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest OK')\"",
     "build": "node scripts/build.js",

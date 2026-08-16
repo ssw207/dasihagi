@@ -1,4 +1,4 @@
-// 개인정보(PII) 자동 감지 모듈 — 폼 프리셋 Chrome Extension
+// 개인정보(PII) 자동 감지 모듈 — 다시하기 Chrome Extension
 //
 // 감지 순서 (Bitwarden 자동완성 파이프라인 참고):
 //   1. autocomplete 속성 (autocomplete / x-autocompletetype / autocompletetype)

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "폼 프리셋",
+  "name": "다시하기",
   "version": "0.1.0",
-  "description": "사이트별 폼 자동 세팅 프리셋. 원하는 인풋을 클릭해 값을 저장하고 한 번에 적용하세요.",
+  "description": "한 번 한 입력·클릭·이동을 녹화해 두고 다시 실행합니다.",
   "permissions": ["storage", "tabs", "scripting", "webNavigation"],
   "background": {
     "service_worker": "background.js",
@@ -10,7 +10,7 @@
   },
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "폼 프리셋"
+    "default_title": "다시하기"
   },
   "content_scripts": [
     {

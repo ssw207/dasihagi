@@ -1480,6 +1480,9 @@ function validateImportData(data) {
   if (data.schemaVersion > EXPORT_SCHEMA_VERSION) {
     throw new Error('새 버전의 파일입니다. 확장 프로그램을 업데이트하세요.');
   }
+  if (data.appId != null && data.appId !== 'dasihagi' && data.appId !== 'form-preset-extension') {
+    throw new Error('이 확장 프로그램의 백업 파일이 아닙니다.');
+  }
 
   const rawPresets = Array.isArray(data.presets) ? data.presets : [];
   const rawGroups = Array.isArray(data.groups) ? data.groups : [];
