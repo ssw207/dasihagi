@@ -13,8 +13,47 @@ const MAX_URL_PATTERNS = 20; // 프리셋당 허용 사이트 상한
 const captureTabs = new Set();
 const RECORD_SESSIONS_KEY = 'recordSessions';
 const RECORD_MAX_DELAY = 5000;
+const REPLAY_PACE_KEY = 'ui:replayPace';
 
-let recordSessions = {}; // tabId → { presetId, events, lastRecordAt, startUrl, lastUrl, allowedSites }
+function normalizeReplayPace(v) {
+  return v === 'fast' || v === 'slow' ? v : 'normal';
+}
+
+async function getReplayPace() {
+  try {
+    const data = await chrome.storage.local.get(REPLAY_PACE_KEY);
+    return normalizeReplayPace(data[REPLAY_PACE_KEY]);
+  } catch (e) {
+    return 'normal';
+  }
+}
+
+function paceDelayMs(raw, pace) {
+  const d = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), RECORD_MAX_DELAY) : 150;
+  if (pace === 'fast') return Math.min(d, 40);
+  if (pace === 'slow') return Math.min(Math.round(d * 1.5) + 200, RECORD_MAX_DELAY);
+  return d;
+}
+
+function paceAfterNavigateMs(pace) {
+  if (pace === 'fast') return 0;
+  if (pace === 'slow') return 1000;
+  return 200;
+}
+
+function paceTabWaitMs(pace) {
+  if (pace === 'fast') return 8000;
+  if (pace === 'slow') return 20000;
+  return 15000;
+}
+
+function paceWaitElementMs(pace) {
+  if (pace === 'fast') return 2500;
+  if (pace === 'slow') return 8000;
+  return 5000;
+}
+
+let recordSessions = {}; // tabId → session (같은 sessionId는 객체 공유: 팝업 탭 이어 녹화)
 let journeyReplayTabId = null;
 const tabCompleteWaiters = [];
 
@@ -169,6 +208,74 @@ async function saveGroups(groups) {
   await chrome.storage.local.set({ [GROUPS_KEY]: groups });
 }
 
+async function listFrameIds(tabId) {
+  try {
+    if (chrome.webNavigation && typeof chrome.webNavigation.getAllFrames === 'function') {
+      const frames = await chrome.webNavigation.getAllFrames({ tabId });
+      if (Array.isArray(frames) && frames.length) {
+        return frames.map((f) => f.frameId);
+      }
+    }
+  } catch (e) {
+    // webNavigation 없거나 탭이 없으면 메인 프레임만
+  }
+  return [0];
+}
+
+async function sendToAllFrames(tabId, msg) {
+  const ids = await listFrameIds(tabId);
+  const results = [];
+  for (const frameId of ids) {
+    try {
+      const resp = await chrome.tabs.sendMessage(tabId, msg, { frameId });
+      results.push({ frameId, ok: true, resp });
+    } catch (e) {
+      results.push({ frameId, ok: false, error: e });
+    }
+  }
+  return results;
+}
+
+function mergeApplyPresetResults(results) {
+  const applied = [];
+  const appliedLabels = new Set();
+  const failMap = new Map();
+  for (const r of results) {
+    if (!r.ok || !r.resp) continue;
+    const data = r.resp.result || r.resp;
+    for (const a of data.applied || []) {
+      applied.push(a);
+      if (a && a.label) appliedLabels.add(a.label);
+    }
+    for (const f of data.failures || []) {
+      const key = (f && f.label) || '';
+      if (key) failMap.set(key, f);
+    }
+  }
+  const failures = [...failMap.values()].filter((f) => !appliedLabels.has(f.label));
+  return { applied, failures };
+}
+
+async function sendApplyToFrames(tabId, msg) {
+  const results = await sendToAllFrames(tabId, msg);
+  if (msg.type === 'APPLY_ACTION') {
+    for (const r of results) {
+      const res = r.resp && r.resp.result;
+      if (r.ok && res && res.ok) return r.resp;
+    }
+    const last = [...results].reverse().find((r) => r.ok && r.resp);
+    return last ? last.resp : { result: { ok: false, reason: '적용 실패' } };
+  }
+  if (msg.type === 'APPLY_PRESET') {
+    return { result: mergeApplyPresetResults(results) };
+  }
+  if (msg.type === 'SUBMIT_FORM') {
+    const hit = results.find((r) => r.ok && r.resp && r.resp.ok);
+    return hit ? hit.resp : { ok: false, reason: '제출 버튼을 찾을 수 없습니다.' };
+  }
+  return results.some((r) => r.ok);
+}
+
 function sessionKey(tabId) {
   return String(tabId);
 }
@@ -186,8 +293,16 @@ function deleteRecordSession(tabId) {
 }
 
 async function persistRecordSessions() {
+  const tabs = {};
+  const sessions = {};
+  for (const [tabId, s] of Object.entries(recordSessions)) {
+    if (!s || typeof s !== 'object') continue;
+    if (!s.sessionId) s.sessionId = crypto.randomUUID();
+    tabs[tabId] = s.sessionId;
+    sessions[s.sessionId] = s;
+  }
   try {
-    await chrome.storage.session.set({ [RECORD_SESSIONS_KEY]: recordSessions });
+    await chrome.storage.session.set({ [RECORD_SESSIONS_KEY]: { v: 2, tabs, sessions } });
   } catch (e) {
     // session 저장 실패 시 메모리 세션만 유지
   }
@@ -197,10 +312,43 @@ async function restoreRecordSessions() {
   try {
     const data = await chrome.storage.session.get(RECORD_SESSIONS_KEY);
     const raw = data[RECORD_SESSIONS_KEY];
-    recordSessions = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    recordSessions = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    if (raw.v === 2 && raw.tabs && raw.sessions) {
+      for (const [tabId, sid] of Object.entries(raw.tabs)) {
+        const s = raw.sessions[sid];
+        if (s) recordSessions[tabId] = s;
+      }
+      return;
+    }
+    recordSessions = raw;
   } catch (e) {
     recordSessions = {};
   }
+}
+
+function tabIdsForSession(session) {
+  if (!session) return [];
+  return Object.keys(recordSessions)
+    .filter((k) => {
+      const s = recordSessions[k];
+      return s === session || (session.sessionId && s && s.sessionId === session.sessionId);
+    })
+    .map((k) => Number(k));
+}
+
+function attachRecordingFromOpener(tab) {
+  if (!tab || tab.id == null) return false;
+  if (getRecordSession(tab.id)) return true;
+  const openerId = tab.openerTabId;
+  if (openerId == null) return false;
+  const source = getRecordSession(openerId);
+  if (!source) return false;
+  if (tab.url && isRestrictedRecordUrl(tab.url)) return false;
+  if (!source.sessionId) source.sessionId = crypto.randomUUID();
+  setRecordSession(tab.id, source);
+  if (tab.url) rememberSessionSite(source, tab.url);
+  return true;
 }
 
 function isJourneyPreset(preset) {
@@ -287,10 +435,10 @@ function notifyTabComplete(tabId) {
   }
 }
 
-async function navigateTab(tabId, url) {
+async function navigateTab(tabId, url, timeoutMs) {
   const tab = await chrome.tabs.get(tabId);
   if (normalizeNavUrl(tab.url) === normalizeNavUrl(url)) return true;
-  const waited = waitForTabComplete(tabId, 15000);
+  const waited = waitForTabComplete(tabId, timeoutMs || 15000);
   await chrome.tabs.update(tabId, { url });
   return waited;
 }
@@ -316,7 +464,7 @@ async function resumeRecordingIfNeeded(tabId) {
   const session = getRecordSession(tabId);
   if (!session) return;
   try {
-    await chrome.tabs.sendMessage(tabId, {
+    await sendToAllFrames(tabId, {
       type: 'RECORD_START',
       presetId: session.presetId,
       resume: true,
@@ -346,25 +494,30 @@ async function replayJourney(tabId, preset) {
   const fields = Array.isArray(preset.fields) ? preset.fields : [];
   const applied = [];
   const failures = [];
+  const pace = await getReplayPace();
+  const tabWait = paceTabWaitMs(pace);
+  const afterNav = paceAfterNavigateMs(pace);
+  const waitEl = paceWaitElementMs(pace);
   journeyReplayTabId = tabId;
   try {
     if (preset.startUrl) {
-      const moved = await navigateTab(tabId, preset.startUrl);
+      const moved = await navigateTab(tabId, preset.startUrl, tabWait);
       if (!moved) {
         failures.push({ ok: false, label: '시작 페이지', reason: '시작 페이지로 이동하지 못했습니다.' });
         return { applied, failures };
       }
+      if (afterNav) await new Promise((r) => setTimeout(r, afterNav));
     }
     for (const field of fields) {
-      const delay = Number.isFinite(field.delay) ? Math.min(Math.max(field.delay, 0), RECORD_MAX_DELAY) : 150;
-      await new Promise((r) => setTimeout(r, delay));
+      await new Promise((r) => setTimeout(r, paceDelayMs(field.delay, pace)));
       if (field.type === 'navigate') {
         try {
-          const moved = await navigateTab(tabId, field.value);
+          const moved = await navigateTab(tabId, field.value, tabWait);
           if (!moved) {
             failures.push({ ok: false, label: field.label, reason: '페이지 이동 시간 초과' });
             continue;
           }
+          if (afterNav) await new Promise((r) => setTimeout(r, afterNav));
           applied.push({ ok: true, label: field.label });
         } catch (e) {
           failures.push({
@@ -376,7 +529,11 @@ async function replayJourney(tabId, preset) {
         continue;
       }
       try {
-        const resp = await chrome.tabs.sendMessage(tabId, { type: 'APPLY_ACTION', field });
+        const resp = await sendApplyToFrames(tabId, {
+          type: 'APPLY_ACTION',
+          field,
+          waitMs: waitEl
+        });
         const res = resp && resp.result;
         if (res && res.ok) {
           applied.push(res);
@@ -384,7 +541,7 @@ async function replayJourney(tabId, preset) {
           failures.push(res || { ok: false, label: field.label, reason: '적용 실패' });
         }
       } catch (e) {
-        const moved = await waitForTabComplete(tabId, 8000);
+        const moved = await waitForTabComplete(tabId, Math.min(tabWait, 8000));
         if (moved) {
           applied.push({ ok: true, label: field.label });
         } else {
@@ -711,7 +868,8 @@ async function handleStepTabLoaded(tabId) {
 
   let applyResult = { applied: [], failures: [] };
   try {
-    const resp = await chrome.tabs.sendMessage(tabId, { type: 'APPLY_PRESET', preset });
+    const replayPace = await getReplayPace();
+    const resp = await sendApplyToFrames(tabId, { type: 'APPLY_PRESET', preset, replayPace });
     applyResult = (resp && resp.result) || applyResult;
   } catch (e) {
     await failRun('스텝 "' + stepInfo.presetName + '" 적용 실패: 페이지와 통신할 수 없습니다.');
@@ -726,7 +884,7 @@ async function handleStepTabLoaded(tabId) {
   if (stepInfo.submitMode === 'auto') {
     await new Promise((r) => setTimeout(r, 1200));
     try {
-      const submitResp = await chrome.tabs.sendMessage(tabId, {
+      const submitResp = await sendApplyToFrames(tabId, {
         type: 'SUBMIT_FORM',
         selector: stepInfo.submitSelector
       });
@@ -885,20 +1043,15 @@ async function handleMessage(msg, sender) {
     }
     case 'CAPTURE_START': {
       captureTabs.add(msg.tabId);
-      try {
-        await chrome.tabs.sendMessage(msg.tabId, { type: 'CAPTURE_START', presetId: msg.presetId });
-      } catch (e) {
+      const cap = await sendToAllFrames(msg.tabId, { type: 'CAPTURE_START', presetId: msg.presetId });
+      if (!cap.some((r) => r.ok)) {
         throw new Error('페이지에서 캡처 모드를 시작할 수 없습니다. 지원되지 않는 페이지(예: chrome://)입니다.');
       }
       return true;
     }
     case 'CAPTURE_STOP': {
       captureTabs.delete(msg.tabId);
-      try {
-        await chrome.tabs.sendMessage(msg.tabId, { type: 'CAPTURE_STOP' });
-      } catch (e) {
-        // 페이지가 닫혔거나 스크립트가 없으면 무시
-      }
+      await sendToAllFrames(msg.tabId, { type: 'CAPTURE_STOP' });
       return true;
     }
     case 'CAPTURE_STATUS': {
@@ -930,19 +1083,19 @@ async function handleMessage(msg, sender) {
       if (existing && existing.presetId === msg.presetId) {
         rememberSessionSite(existing, tab.url);
         await persistRecordSessions();
-        try {
-          await chrome.tabs.sendMessage(tabId, {
-            type: 'RECORD_START',
-            presetId: msg.presetId,
-            resume: true,
-            eventCount: existing.events.length
-          });
-        } catch (e) {
+        const resumed = await sendToAllFrames(tabId, {
+          type: 'RECORD_START',
+          presetId: msg.presetId,
+          resume: true,
+          eventCount: existing.events.length
+        });
+        if (!resumed.some((r) => r.ok)) {
           throw new Error('페이지에서 녹화를 시작할 수 없습니다. 지원되지 않는 페이지(예: chrome://)입니다.');
         }
         return true;
       }
       setRecordSession(tabId, {
+        sessionId: crypto.randomUUID(),
         presetId: msg.presetId,
         events: [],
         lastRecordAt: 0,
@@ -952,19 +1105,28 @@ async function handleMessage(msg, sender) {
       });
       rememberSessionSite(getRecordSession(tabId), tab.url);
       await persistRecordSessions();
-      try {
-        await chrome.tabs.sendMessage(tabId, {
-          type: 'RECORD_START',
-          presetId: msg.presetId,
-          resume: false,
-          eventCount: 0
-        });
-      } catch (e) {
+      const started = await sendToAllFrames(tabId, {
+        type: 'RECORD_START',
+        presetId: msg.presetId,
+        resume: false,
+        eventCount: 0
+      });
+      if (!started.some((r) => r.ok)) {
         deleteRecordSession(tabId);
         await persistRecordSessions();
         throw new Error('페이지에서 녹화를 시작할 수 없습니다. 지원되지 않는 페이지(예: chrome://)입니다.');
       }
       return true;
+    }
+    case 'RECORD_STATUS': {
+      const tabId = msg.tabId;
+      const session = getRecordSession(tabId);
+      if (!session) return { active: false, presetId: null, eventCount: 0 };
+      return {
+        active: true,
+        presetId: session.presetId,
+        eventCount: Array.isArray(session.events) ? session.events.length : 0
+      };
     }
     case 'RECORD_APPEND': {
       const tabId = msg.tabId || (sender.tab && sender.tab.id);
@@ -977,13 +1139,17 @@ async function handleMessage(msg, sender) {
     }
     case 'RECORD_STOP': {
       const tabId = msg.tabId || (sender.tab && sender.tab.id);
-      try {
-        await chrome.tabs.sendMessage(tabId, { type: 'RECORD_STOP' });
-      } catch (e) {
-        // 페이지가 닫혔거나 스크립트가 없으면 세션에 남은 이벤트로 저장
-      }
       const session = getRecordSession(tabId);
-      deleteRecordSession(tabId);
+      const linked = tabIdsForSession(session);
+      const stopIds = linked.length ? linked : tabId != null ? [tabId] : [];
+      for (const id of stopIds) {
+        try {
+          await sendToAllFrames(id, { type: 'RECORD_STOP' });
+        } catch (e) {
+          // 페이지가 닫혔거나 스크립트가 없으면 세션에 남은 이벤트로 저장
+        }
+        deleteRecordSession(id);
+      }
       await persistRecordSessions();
       if (!session || !Array.isArray(session.events) || session.events.length === 0) {
         return { saved: 0 };
@@ -1042,8 +1208,17 @@ async function handleMessage(msg, sender) {
       if (!matchPresetUrl(preset, tab.url)) {
         throw new Error('현재 페이지가 프리셋 대상 사이트가 아닙니다.');
       }
-      const resp = await chrome.tabs.sendMessage(msg.tabId, { type: 'APPLY_PRESET', preset });
+      const replayPace = await getReplayPace();
+      const resp = await sendApplyToFrames(msg.tabId, { type: 'APPLY_PRESET', preset, replayPace });
       return resp && resp.result;
+    }
+    case 'SETTINGS_GET': {
+      return { replayPace: await getReplayPace() };
+    }
+    case 'SETTINGS_SET': {
+      const pace = normalizeReplayPace(msg.replayPace);
+      await chrome.storage.local.set({ [REPLAY_PACE_KEY]: pace });
+      return { replayPace: pace };
     }
     case 'AUTO_APPLY_CHECK': {
       const index = await getPresetIndex();
@@ -1140,7 +1315,8 @@ async function applyAutoPreset(tabId, url) {
       try {
         const preset = await getPresetById(entry.id);
         if (!preset || isJourneyPreset(preset)) continue;
-        await chrome.tabs.sendMessage(tabId, { type: 'APPLY_PRESET', preset });
+        const replayPace = await getReplayPace();
+        await sendApplyToFrames(tabId, { type: 'APPLY_PRESET', preset, replayPace });
       } catch (e) {
         // 페이지가 아직 스크립트를 로드하지 않았으면 무시
       }
@@ -1150,7 +1326,12 @@ async function applyAutoPreset(tabId, url) {
   }
 }
 
+chrome.tabs.onCreated.addListener((tab) => {
+  if (attachRecordingFromOpener(tab)) persistRecordSessions();
+});
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!getRecordSession(tabId)) attachRecordingFromOpener(tab);
   if (changeInfo.url) {
     appendNavigateIfRecording(tabId, changeInfo.url);
   }

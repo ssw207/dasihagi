@@ -84,6 +84,7 @@ globalThis.chrome = {
       return { result: { applied: [], failures: [] } };
     },
     onUpdated: { addListener() {} },
+    onCreated: { addListener() {} },
     onRemoved: { addListener() {} },
     async create() {
       return { id: 9999 };

@@ -6,7 +6,7 @@
 >
 > **관련 문서**: `.sisyphus/notepads/form-preset-extension/decisions.md`(결정 D1~), `.sisyphus/plans/*.md`(라운드 계획), `README.md`(사용자 매뉴얼)
 >
-> **최종 갱신**: 2026-08-16 (D28 완성도 패스)
+> **최종 갱신**: 2026-08-16 (D32 iframe 지원)
 
 ---
 
@@ -99,7 +99,7 @@
 |----|----------|-----------|
 | R8-1 | `test/encryption-verify.mjs`: mock chrome으로 실제 background.js 구동, 프리셋 blob 암호화 S1~S11 + 레거시 마이그레이션 M1~M2 검증 | `npm run test:encrypt` 전부 PASS |
 | R8-2 | `test/record-replay-verify.mjs`: mock DOM+chrome으로 녹화→저장→재생 통합 검증 (전체 암호화 + sensitive 마스킹 신호 보존) | `npm run test:replay` 전부 PASS |
-| R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html + journey-*.html) + SW `chrome.storage.local` 직접 검증. A 기본, B 녹화 엣지, C PII, D 재생, E 레거시 마이그레이션, **F 멀티페이지 여정**(검색→클릭→이동→상품 재생, 칩 복원, 자동적용 제외) | `npm run test:e2e` **49/49 PASS** |
+| R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html + journey-*.html) + SW `chrome.storage.local` 직접 검증. A 기본, B 녹화 엣지, C PII, D 재생, E 레거시 마이그레이션, **F 멀티페이지 여정**, **G 입력 팝업 열기→입력→확인 닫힘→재생** | `npm run test:e2e` **58/58 PASS** |
 
 ### R9. 녹화/재생 방식 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -152,6 +152,40 @@
 | R14-4 | blob + 인덱스 정리, 그룹 스텝에서 해당 presetId 제거 | PRESET_DELETE_MANY |
 | R14-5 | 카드/편집의 1개 삭제는 유지 | PRESET_DELETE |
 
+### R15. 팝업 UX (P0) — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R15-1 | 목록/빈 화면에서 **이 사이트 녹화**: 현재 호스트 프리셋 생성 후 즉시 녹화 | 제한 URL은 거절 |
+| R15-2 | 녹화 중 popup 상단 배너(`녹화 중 · N개`) + 종료 | `RECORD_STATUS` |
+| R15-3 | 카드 주 버튼은 재생, 녹화/편집/삭제는 `⋯` 메뉴 | 바깥 클릭 시 닫힘 |
+| R15-4 | **현재 사이트만** 필터 (기본 켜짐, `ui:filterCurrentSite` 저장) | 0개면 안내 + 녹화 버튼 |
+| R15-5 | 셀렉터 기본 접기, 암호화 문구 순화, 그룹/여정 안내, 여정 자동적용 이유, 내보내기·가져오기 더보기 | Quick Win |
+
+### R16. 녹화 중 팝업/새 탭 이어짐 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R16-1 | A에서 녹화 중 `openerTabId`가 A인 B 탭/창이 열리면 같은 세션으로 녹화 재개 | onCreated / onUpdated + 칩 |
+| R16-2 | B의 입력·클릭·이동이 같은 프리셋 `fields[]`에 시간 순으로 붙는다 | 공유 session.events |
+| R16-3 | B URL은 허용 사이트에 추가. `chrome://` 팝업은 무시 | allowedSites |
+| R16-4 | B를 닫아도 A 녹화는 유지. 종료는 연결된 탭 모두 칩 종료 후 한 번 저장 | RECORD_STOP |
+
+### R17. 재생 속도 (페이지 이동 후 대기) — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R17-1 | 전역 설정 `ui:replayPace`: `fast` / `normal`(기본) / `slow` | SETTINGS_GET/SET |
+| R17-2 | 빠름: 녹화 delay를 짧게 자르고 이동 후 추가 대기 없음 (사내·봇제한 없음) | paceDelayMs ≤40, afterNav 0 |
+| R17-3 | 보통: 녹화 delay 그대로 + 이동 후 200ms | 기존에 가깝게 |
+| R17-4 | 느림: delay 배율 + 이동 후 1초 | 외부 사이트 |
+| R17-5 | popup에 **재생 속도** 세그먼트. 사이트 목록 하드코딩 없음 | 사용자가 고름 |
+
+### R18. iframe 안 폼 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R18-1 | content script `all_frames: true` | iframe 안 input도 리스너 |
+| R18-2 | 녹화/캡처/적용/제출 메시지를 탭의 모든 프레임에 전달 | webNavigation.getAllFrames |
+| R18-3 | APPLY_ACTION은 성공한 첫 프레임, APPLY_PRESET은 프레임 결과 병합 | sendApplyToFrames |
+| R18-4 | 녹화 칩은 top 또는 충분히 큰 iframe만 | 작은 광고 iframe에 칩 난립 방지 |
+
 ### R10. 개인정보 자동 감지 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
@@ -169,7 +203,7 @@
 
 | ID | 요구사항 | 비고 |
 |----|----------|------|
-| NFR-1 | Manifest V3 준수 (service_worker, content_scripts `<all_urls>`, permissions: storage/tabs/scripting) | manifest.json |
+| NFR-1 | Manifest V3 준수 (service_worker, content_scripts `<all_urls>` `all_frames`, permissions: storage/tabs/scripting/webNavigation) | manifest.json |
 | NFR-2 | 네이티브 JS만 사용, 번들러/의존성 추가 금지 | devDependencies: playwright만 |
 | NFR-3 | 모든 UI 문자열 한국어 | popup/content 패널/options |
 | NFR-4 | 배포 산출물: `npm run build` → `dist/` (manifest/background/content/secure-store + popup/icons) | scripts/build.js |
@@ -252,6 +286,7 @@
 | CAPTURE_START / STOP / STATUS | popup→background→content | 캡처 모드 토글/조회 |
 | CAPTURE_SAVE_FIELD | content→background | 캡처된 필드 저장 (프리셋 blob 갱신) |
 | RECORD_START / STOP / SAVE | popup/content↔background | 녹화 모드 토글 + 녹화 저장 (전체 프리셋 암호화, sensitive 신호 보존) |
+| RECORD_STATUS | popup↔background | 현재 탭 녹화 여부·presetId·eventCount |
 | RECORD_APPEND | content→background | 확정된 행동 1건을 세션 버퍼에 추가 (페이지 이동 생존) |
 | APPLY_ACTION | background→content | 여정 재생 중 한 행동(값/클릭/Enter) 적용 |
 | APPLY_PRESET | popup/background→content | 프리셋 적용 (여정이면 background 같은 탭 재생, 아니면 content) |
@@ -259,6 +294,7 @@
 | GET_CURRENT_URL | popup→background | 현재 탭 URL |
 | EXPORT_DATA / IMPORT_DATA | popup→background | 백업/복원 (민감 복호화/재암호화) |
 | SUBMIT_FORM | background→content | 그룹 auto 제출 |
+| SETTINGS_GET / SETTINGS_SET | popup↔background | 재생 속도(`replayPace`: fast/normal/slow) |
 
 ## 6. 검증 체크리스트 (병렬 처리 진행 확인용)
 
@@ -287,6 +323,10 @@
 - [x] R12: 녹화 중 방문 사이트 N개 자동 허용 + 레거시 urlPattern 하위 호환
 - [x] R13: 편집에서 필드 표시 이름 수정 + 공백 시 `필드`
 - [x] R14: 프리셋 여러 개 선택 삭제 + 그룹 스텝 정리
+- [x] R15: 이 사이트 녹화 / 녹화 배너 / 카드 ⋯ 메뉴 / 현재 사이트만 필터
+- [x] R16: 녹화 중 opener 팝업/새 탭 이어 녹화
+- [x] R17: 재생 속도(이동 후 대기) fast/normal/slow
+- [x] R18: iframe 안 폼 녹화/재생
 
 ## 7. 확정 결정 사항 요약 (decisions.md 상세)
 
@@ -320,6 +360,10 @@
 | D26 | 녹화(및 캡처) 후 편집 화면에서 필드 표시 이름을 수정할 수 있다. 스키마 변경 없음. |
 | D27 | 프리셋 여러 개 선택 삭제. `PRESET_DELETE_MANY`, 확인 창, 그룹 스텝 정리. |
 | D28 | 완성도 패스: 같은 프리셋 `RECORD_START` 버퍼 유지, 여정 배지, 여정 자동적용 UI 차단, 키 오류를 popup에 표시, 필드 값 읽기 정규화. fill-form 대체 스키마는 흡수하지 않음. |
+| D29 | UI 제안 P0+Quick Win: 이 사이트 녹화, RECORD_STATUS 배너, 카드 ⋯ 메뉴, 현재 사이트만 필터, 셀렉터 접기, 툴바 더보기. P1/P2는 보류. |
+| D30 | 녹화 중 A가 연 B 팝업/새 탭은 같은 세션으로 이어 녹화. sessionId로 탭을 묶고 RECORD_STOP은 묶인 탭을 함께 종료. |
+| D31 | 재생 속도 전역 설정. 사내(봇 제한 없음)는 빠름, 외부는 보통/느림. 도메인 하드코딩 없음. |
+| D32 | iframe 지원: all_frames + 전 프레임 메시지. 상위 페이지에서 cross-origin DOM을 읽지 않음. |
 
 ## 8. 보류/미구현 항목
 
@@ -327,7 +371,7 @@
 |------|------|------|
 | options_page (전용 설정 페이지) | 보류 확정 | popup 프리셋 관리와 기능 중복 (D10/D14) |
 | `프리셋-정보-관리` 브랜치 병합 | 보류 | 별도 구현체, 가치 기능 전부 흡수 완료 (D8/D12), 참조용 보관 |
-| 브라우저 E2E 테스트 (Playwright) | ✅ 해소 (R8-3, D22) | `npm run test:e2e` 49/49 PASS (A~E + F 여정, 2026-08-16) |
+| 브라우저 E2E 테스트 (Playwright) | ✅ 해소 (R8-3, D22) | `npm run test:e2e` 58/58 PASS (A~H, iframe 어드민 포함, 2026-08-16) |
 | 멀티페이지 사용자 여정 녹화/재생 (한 프리셋, 클릭·검색·페이지 이동) | ✅ 해소 (R11, D20) | recordSessions + 클릭/Enter/이동 녹화 + 같은 탭 재생. 동적 사이트의 셀렉터 불안정은 제품 한계로 README에 명시. |
 
 ## 9. 변경 이력
@@ -347,3 +391,8 @@
 | 2026-08-16 | D26 | 녹화 후 필드명 수정(R13): 편집 화면에서 `fields[].label` 직접 수정. 메타프롬프트 `메타-프롬프트-녹화-필드명-수정.md`. | — |
 | 2026-08-16 | D27 | 프리셋 여러 개 삭제(R14): 체크박스 + `PRESET_DELETE_MANY`. 메타프롬프트 `메타-프롬프트-프리셋-여러개-삭제.md`. | — |
 | 2026-08-16 | D28 | 완성도 패스: 녹화 재시작 가드, 여정 배지/자동적용 비활성, vault 키 오류 안내, 필드 값 정규화. 메타프롬프트 `메타-프롬프트-완성도-향상.md`. | — |
+| 2026-08-16 | D29 | UI P0(R15): 이 사이트 녹화, 녹화 배너, 카드 메뉴, 현재 사이트만. 메타프롬프트 `메타-프롬프트-UI-P0-개선.md`. | — |
+| 2026-08-16 | D30 | 팝업/새 탭 이어 녹화(R16). 메타프롬프트 `메타-프롬프트-녹화-팝업창-이어짐.md`. | — |
+| 2026-08-16 | D31 | 재생 속도(R17): 페이지 이동 후 대기 조절. 메타프롬프트 `메타-프롬프트-재생-이동후대기-설정.md`. | — |
+| 2026-08-16 | D32 | iframe 녹화/재생(R18). 메타프롬프트 `메타-프롬프트-iframe-지원.md`. | — |
+| 2026-08-16 | docs | README를 공개 GitHub 기준 설치·사용 설명으로 전면 갱신. 메타프롬프트 `메타-프롬프트-README-깃허브-사용설명.md`. | — |

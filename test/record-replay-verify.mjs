@@ -435,6 +435,8 @@ function callBackground(msg) {
 
 let mockTabUrl = 'https://example.com/form';
 const tabUpdatedListeners = [];
+const tabCreatedListeners = [];
+const tabRemovedListeners = [];
 
 globalThis.chrome = {
   runtime: {
@@ -488,7 +490,16 @@ globalThis.chrome = {
         if (idx !== -1) tabUpdatedListeners.splice(idx, 1);
       }
     },
-    onRemoved: { addListener() {} }
+    onCreated: {
+      addListener(fn) {
+        tabCreatedListeners.push(fn);
+      }
+    },
+    onRemoved: {
+      addListener(fn) {
+        tabRemovedListeners.push(fn);
+      }
+    }
   },
   action: {
     setBadgeText() {},
@@ -597,8 +608,14 @@ piiCalls.length = 0;
 console.log('\n[녹화]');
 
 // 5-2. 녹화 시작
+const recIdle = await callBackground({ type: 'RECORD_STATUS', tabId: 1 });
+check('녹화 전 RECORD_STATUS inactive', !!(recIdle.ok && recIdle.data && recIdle.data.active === false), true);
+
 const recStart = await callBackground({ type: 'RECORD_START', presetId, tabId: 1 });
 check('RECORD_START ok', !!recStart.ok, true);
+const recOn = await callBackground({ type: 'RECORD_STATUS', tabId: 1 });
+check('녹화 중 RECORD_STATUS active', !!(recOn.ok && recOn.data && recOn.data.active), true);
+check('녹화 중 presetId 일치', recOn.data && recOn.data.presetId, presetId);
 
 // 5-3. 이름 입력 (첫 이벤트, delay 0)
 nameInput._value = '홍길동';
@@ -624,6 +641,8 @@ await sleep(450);
 // 5-8. 녹화 종료 → RECORD_SAVE
 const recStop = await callBackground({ type: 'RECORD_STOP', presetId, tabId: 1 });
 check('RECORD_STOP ok', !!recStop.ok, true);
+const recOff = await callBackground({ type: 'RECORD_STATUS', tabId: 1 });
+check('종료 후 RECORD_STATUS inactive', !!(recOff.ok && recOff.data && recOff.data.active === false), true);
 await sleep(100); // RECORD_SAVE 메시지 처리 대기
 
 // 5-9. 저장 검증 — 프리셋별 전체 암호화 (평문 인덱스 + 암호화 blob)
@@ -894,6 +913,164 @@ const list6 = await callBackground({ type: 'PRESET_LIST' });
 const idemp = list6.data.find((p) => p.id === idempId);
 const idempName = (idemp.fields || []).find((f) => f && String(f.value) === '이중시작값');
 check('이중 RECORD_START 후에도 값 유지', !!idempName, true);
+
+console.log('\n[팝업 탭 이어 녹화]');
+const created7 = await callBackground({ type: 'PRESET_CREATE', name: '팝업이어짐', urlPattern: 'example.com' });
+const popupRecId = created7.data.id;
+mockTabUrl = 'https://example.com/form';
+globalThis.location.href = mockTabUrl;
+await callBackground({ type: 'RECORD_START', presetId: popupRecId, tabId: 1 });
+nameInput._value = 'A사이트값';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+const popupTab = { id: 2, openerTabId: 1, url: 'https://shop.other.com/popup', status: 'loading' };
+tabCreatedListeners.forEach((fn) => fn(popupTab));
+mockTabUrl = popupTab.url;
+tabUpdatedListeners.forEach((fn) =>
+  fn(2, { url: popupTab.url }, { id: 2, url: popupTab.url, openerTabId: 1 })
+);
+tabUpdatedListeners.forEach((fn) =>
+  fn(2, { status: 'complete' }, { id: 2, url: popupTab.url, status: 'complete', openerTabId: 1 })
+);
+await sleep(30);
+const popupStatus = await callBackground({ type: 'RECORD_STATUS', tabId: 2 });
+check('팝업 탭 RECORD_STATUS active', !!(popupStatus.ok && popupStatus.data && popupStatus.data.active), true);
+await callBackground({
+  type: 'RECORD_APPEND',
+  tabId: 2,
+  event: { label: '팝업입력', selector: '#popup-q', value: 'B사이트값', type: 'text' }
+});
+const popupStop = await callBackground({ type: 'RECORD_STOP', presetId: popupRecId, tabId: 2 });
+check('팝업 탭 RECORD_STOP ok', !!popupStop.ok, true);
+const list7 = await callBackground({ type: 'PRESET_LIST' });
+const popupPreset = list7.data.find((p) => p.id === popupRecId);
+const popupTypes = (popupPreset.fields || []).map((f) => f.type);
+const popupValues = (popupPreset.fields || []).map((f) => f.value);
+const popupSites = (popupPreset.urlPatterns || []).join(',');
+check('팝업 이어 녹화에 A 입력 유지', popupValues.includes('A사이트값'), true);
+check('팝업 이어 녹화에 B 입력 포함', popupValues.includes('B사이트값'), true);
+check('팝업 URL navigate 기록', popupTypes.includes('navigate'), true);
+check('허용 사이트에 shop.other.com', popupSites.includes('shop.other.com'), true);
+
+console.log('\n[입력 팝업 확인 후 닫힘]');
+const openModalBtn = document.createElement('button');
+openModalBtn.setAttribute('id', 'open-modal');
+openModalBtn.setAttribute('type', 'button');
+openModalBtn.textContent = '상세 입력';
+const modalBox = document.createElement('div');
+modalBox.setAttribute('id', 'input-modal');
+modalBox.hidden = true;
+const modalInput = document.createElement('input');
+modalInput.setAttribute('id', 'modal-note');
+modalInput.setAttribute('name', 'modal_note');
+modalInput.setAttribute('placeholder', '추가 메모');
+modalInput.type = 'text';
+const modalConfirm = document.createElement('button');
+modalConfirm.setAttribute('id', 'modal-confirm');
+modalConfirm.setAttribute('type', 'button');
+modalConfirm.textContent = '확인';
+modalBox.appendChild(modalInput);
+modalBox.appendChild(modalConfirm);
+domBody.appendChild(openModalBtn);
+domBody.appendChild(modalBox);
+openModalBtn.addEventListener('click', () => {
+  modalBox.hidden = false;
+});
+modalConfirm.addEventListener('click', () => {
+  modalBox.hidden = true;
+});
+
+const created8 = await callBackground({ type: 'PRESET_CREATE', name: '모달입력', urlPattern: 'example.com' });
+const modalId = created8.data.id;
+mockTabUrl = 'https://example.com/form';
+globalThis.location.href = mockTabUrl;
+await callBackground({ type: 'RECORD_START', presetId: modalId, tabId: 1 });
+document.dispatchSyntheticEvent('click', openModalBtn);
+modalBox.hidden = false;
+modalInput._value = '팝업메모';
+document.dispatchSyntheticEvent('input', modalInput);
+await sleep(450);
+document.dispatchSyntheticEvent('click', modalConfirm);
+modalBox.hidden = true;
+await sleep(30);
+const modalStop = await callBackground({ type: 'RECORD_STOP', presetId: modalId, tabId: 1 });
+check('모달 RECORD_STOP ok', !!modalStop.ok, true);
+const list8 = await callBackground({ type: 'PRESET_LIST' });
+const modalPreset = list8.data.find((p) => p.id === modalId);
+const modalFields = modalPreset.fields || [];
+check('모달 열기 클릭 기록', modalFields.some((f) => f.type === 'click' && String(f.value || '').includes('상세 입력')), true);
+check('모달 입력값 기록', modalFields.some((f) => f.value === '팝업메모'), true);
+check('모달 확인 클릭 기록', modalFields.some((f) => f.type === 'click' && String(f.value || '').includes('확인')), true);
+modalInput._value = '';
+modalBox.hidden = true;
+const modalReplay = await callBackground({ type: 'APPLY_PRESET', presetId: modalId, tabId: 1 });
+check('모달 재생 ok', !!modalReplay.ok, true);
+check('모달 재생 후 입력값', modalInput._value, '팝업메모');
+
+const created9 = await callBackground({ type: 'PRESET_CREATE', name: '팝업닫힘', urlPattern: 'example.com' });
+const closeId = created9.data.id;
+mockTabUrl = 'https://example.com/form';
+await callBackground({ type: 'RECORD_START', presetId: closeId, tabId: 1 });
+nameInput._value = '닫힘전A';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+const closeTab = { id: 3, openerTabId: 1, url: 'https://shop.other.com/dialog', status: 'loading' };
+tabCreatedListeners.forEach((fn) => fn(closeTab));
+tabUpdatedListeners.forEach((fn) =>
+  fn(3, { url: closeTab.url }, { id: 3, url: closeTab.url, openerTabId: 1 })
+);
+tabUpdatedListeners.forEach((fn) =>
+  fn(3, { status: 'complete' }, { id: 3, url: closeTab.url, status: 'complete', openerTabId: 1 })
+);
+await callBackground({
+  type: 'RECORD_APPEND',
+  tabId: 3,
+  event: { label: '팝업확인값', selector: '#dlg', value: '닫힘전B', type: 'text' }
+});
+tabRemovedListeners.forEach((fn) => fn(3));
+const afterClose = await callBackground({ type: 'RECORD_STATUS', tabId: 1 });
+check('팝업 닫힌 뒤 A 녹화 유지', !!(afterClose.ok && afterClose.data && afterClose.data.active), true);
+nameInput._value = '닫힌뒤A';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+await callBackground({ type: 'RECORD_STOP', presetId: closeId, tabId: 1 });
+const list9 = await callBackground({ type: 'PRESET_LIST' });
+const closePreset = list9.data.find((p) => p.id === closeId);
+const closeVals = (closePreset.fields || []).map((f) => f.value);
+check('팝업 닫힘 후 A 입력 유지', closeVals.includes('닫힘전A'), true);
+check('닫힌 팝업의 입력 보존', closeVals.includes('닫힘전B'), true);
+check('팝업 닫힌 뒤 A 추가 입력', closeVals.includes('닫힌뒤A'), true);
+
+console.log('\n[재생 속도 설정]');
+const paceGet0 = await callBackground({ type: 'SETTINGS_GET' });
+check('기본 재생 속도 normal', paceGet0.data && paceGet0.data.replayPace, 'normal');
+const paceSet = await callBackground({ type: 'SETTINGS_SET', replayPace: 'fast' });
+check('SETTINGS_SET fast', paceSet.data && paceSet.data.replayPace, 'fast');
+const paceGet1 = await callBackground({ type: 'SETTINGS_GET' });
+check('SETTINGS_GET fast 유지', paceGet1.data && paceGet1.data.replayPace, 'fast');
+const created10 = await callBackground({ type: 'PRESET_CREATE', name: '속도테스트', urlPattern: 'example.com' });
+const paceId = created10.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: paceId,
+    name: '속도테스트',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    startUrl: 'https://example.com/form',
+    fields: [
+      { id: 'n1', label: '이동', selector: '', value: 'https://example.com/form', type: 'navigate', delay: 3000 },
+      { id: 't1', label: '이름', selector: '#user-name', value: '빠른재생', type: 'text', delay: 2500 }
+    ]
+  }
+});
+nameInput._value = '';
+const tFast = Date.now();
+const paceReplay = await callBackground({ type: 'APPLY_PRESET', presetId: paceId, tabId: 1 });
+const fastMs = Date.now() - tFast;
+check('빠름 재생 ok', !!paceReplay.ok, true);
+check('빠름이면 이동 후 대기가 짧음', fastMs < 1200, true);
+await callBackground({ type: 'SETTINGS_SET', replayPace: 'normal' });
 
 // ============================================================
 // 7. 결과

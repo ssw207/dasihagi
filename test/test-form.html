@@ -21,5 +21,18 @@
     </p>
     <p><textarea name="memo" placeholder="메모"></textarea></p>
   </form>
+  <p><button type="button" id="open-modal">상세 입력</button></p>
+  <div id="input-modal" hidden>
+    <p><label>추가 메모 <input type="text" name="modal_note" id="modal-note" placeholder="추가 메모"></label></p>
+    <p><button type="button" id="modal-confirm">확인</button></p>
+  </div>
+  <script>
+    document.getElementById('open-modal').addEventListener('click', function () {
+      document.getElementById('input-modal').hidden = false;
+    });
+    document.getElementById('modal-confirm').addEventListener('click', function () {
+      document.getElementById('input-modal').hidden = true;
+    });
+  </script>
 </body>
 </html>

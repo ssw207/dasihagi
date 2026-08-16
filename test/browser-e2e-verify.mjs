@@ -108,9 +108,26 @@ async function createPreset(popup, name, pattern = PATTERN, autoApply = false) {
   await popup.waitForSelector('#toast.show');
 }
 
+async function showAllPresets(popup) {
+  const chk = popup.locator('#chk-filter-site');
+  if (await chk.count()) {
+    if (await chk.isChecked()) await chk.uncheck();
+  }
+}
+
+async function clickCardAct(popup, name, act) {
+  const card = popup.locator('.preset-card:has-text("' + name + '")');
+  await card.waitFor({ state: 'visible' });
+  if (act !== 'replay') {
+    await card.locator('[data-menu-toggle]').click();
+    await card.locator('.menu:not(.hidden) [data-act="' + act + '"]').waitFor({ state: 'visible' });
+  }
+  await card.locator('[data-act="' + act + '"]').click();
+}
+
 async function clickRecord(popup) {
   await popup.click('#btn-record');
-  await sleep(300); // popup이 window.close()로 스스로 닫힘
+  await sleep(300);
 }
 
 async function beginRecord(popup) {
@@ -402,8 +419,9 @@ async function scenarioD2Mismatch() {
   await createPreset(popup, '대상아님', 'example.com');
   await formPage.evaluate(() => document.querySelector('form').reset());
   await popup.click('#btn-back');
+  await showAllPresets(popup);
   await popup.waitForSelector('.preset-card:has-text("대상아님")');
-  await popup.click('.preset-card:has-text("대상아님") [data-act="replay"]');
+  await clickCardAct(popup, '대상아님', 'replay');
   await popup.waitForSelector('#toast.show');
   const toast = await popup.textContent('#toast');
   ok('D2 urlPattern 불일치 → 오류 메시지', toast.includes('재생 실패') && toast.includes('대상 사이트'), toast);
@@ -490,22 +508,122 @@ async function scenarioF() {
   await formPage.goto(FORM_URL);
   await formPage.bringToFront();
   const popup2 = await openPopup();
-  await popup2.click('.preset-card:has-text("여정E2E") [data-act="replay"]');
+  await showAllPresets(popup2);
+  await clickCardAct(popup2, '여정E2E', 'replay');
   await formPage.waitForURL(/\/j\/product/, { timeout: 60000 });
   const productId = await formPage.textContent('#product-id');
   ok('F3 재생 후 상품 페이지', productId && productId.trim() === '1', 'id=' + productId);
   await popup2.close().catch(() => {});
 
   const popup3 = await openPopup();
-  await popup3.click('.preset-card:has-text("여정E2E") [data-act="edit"]');
-  await popup3.check('#ed-autoapply');
-  await popup3.click('#btn-save-preset');
-  await popup3.waitForSelector('#toast.show');
+  await showAllPresets(popup3);
+  await clickCardAct(popup3, '여정E2E', 'edit');
+  const autoDisabled = await popup3.locator('#ed-autoapply').isDisabled();
+  const hintVisible = await popup3.locator('#ed-autoapply-hint').isVisible();
+  ok('F4 여정 자동적용 UI 비활성', autoDisabled && hintVisible);
   await popup3.close().catch(() => {});
+
+  const dumpF = await getStorage();
+  const rawF = await decryptSecret(dumpF, 'preset:' + id);
+  const parsedF = rawF ? JSON.parse(rawF) : null;
+  if (parsedF) {
+    parsedF.autoApply = true;
+    const blobF = await encryptSecret(dumpF.vault_key_v1, JSON.stringify(parsedF));
+    await sw.evaluate(async ({ presetId, blob }) => {
+      const data = await chrome.storage.local.get('presets');
+      const index = Array.isArray(data.presets) ? data.presets : [];
+      const entry = index.find((p) => p.id === presetId);
+      if (entry) entry.autoApply = true;
+      await chrome.storage.local.set({ presets: index, ['sec:preset:' + presetId]: blob });
+    }, { presetId: id, blob: blobF });
+  }
+
   await formPage.goto(JOURNEY_HOME);
   await sleep(4000);
   const stayedHome = /\/j\/home/.test(formPage.url());
   ok('F4 여정은 자동 적용되지 않음', stayedHome, formPage.url());
+}
+
+async function scenarioGModalPopup() {
+  await formPage.goto(FORM_URL);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, '모달입력');
+  await beginRecord(popup);
+  await formPage.click('#open-modal');
+  await formPage.waitForSelector('#input-modal:not([hidden])');
+  await formPage.fill('#modal-note', '팝업메모');
+  await sleep(450);
+  await formPage.click('#modal-confirm');
+  await formPage.waitForFunction(() => document.getElementById('input-modal')?.hidden === true);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const types = (blob?.fields || []).map((f) => f.type);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('G1 모달 열기 클릭 기록', (blob?.fields || []).some((f) => f.type === 'click' && String(f.value || '').includes('상세 입력')));
+  ok('G1 모달 입력값 기록', values.includes('팝업메모'), values.join(','));
+  ok('G1 확인 클릭 기록', (blob?.fields || []).some((f) => f.type === 'click' && String(f.value || '').includes('확인')));
+
+  await formPage.evaluate(() => {
+    const modal = document.getElementById('input-modal');
+    const input = document.getElementById('modal-note');
+    if (modal) modal.hidden = true;
+    if (input) input.value = '';
+  });
+  const popup2 = await openPopup();
+  await showAllPresets(popup2);
+  await clickCardAct(popup2, '모달입력', 'replay');
+  await formPage.waitForFunction(() => document.querySelector('#modal-note')?.value === '팝업메모', { timeout: 15000 });
+  const note = await formPage.inputValue('#modal-note');
+  ok('G2 재생 후 모달 입력값', note === '팝업메모', note);
+  await popup2.close().catch(() => {});
+}
+
+async function scenarioHIframe() {
+  const hostUrl = `http://127.0.0.1:${PORT}/iframe-host`;
+  await formPage.goto(hostUrl);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, 'iframe어드민');
+  await beginRecord(popup);
+  const frame = formPage.frameLocator('#admin');
+  await frame.locator('#partner').fill('테스트제휴');
+  await sleep(450);
+  await frame.locator('#fee').fill('3.3');
+  await sleep(450);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('H1 iframe 제휴사 값 기록', values.includes('테스트제휴'), values.join(','));
+  ok('H1 iframe 수수료 값 기록', values.includes('3.3'), values.join(','));
+
+  await formPage.evaluate(() => {
+    const f = document.querySelector('#admin');
+    const doc = f && f.contentDocument;
+    if (!doc) return;
+    const p = doc.querySelector('#partner');
+    const fee = doc.querySelector('#fee');
+    if (p) p.value = '';
+    if (fee) fee.value = '';
+  });
+  const popup2 = await openPopup();
+  await showAllPresets(popup2);
+  await clickCardAct(popup2, 'iframe어드민', 'replay');
+  await formPage.waitForFunction(() => {
+    const f = document.querySelector('#admin');
+    const doc = f && f.contentDocument;
+    if (!doc) return false;
+    const p = doc.querySelector('#partner');
+    const feeEl = doc.querySelector('#fee');
+    return !!(p && feeEl && p.value === '테스트제휴' && feeEl.value === '3.3');
+  }, { timeout: 15000 });
+  const partner = await frame.locator('#partner').inputValue();
+  const fee = await frame.locator('#fee').inputValue();
+  ok('H2 iframe 재생 후 제휴사', partner === '테스트제휴', partner);
+  ok('H2 iframe 재생 후 수수료', fee === '3.3', fee);
+  await popup2.close().catch(() => {});
 }
 
 // ---------- 시나리오 E: 마이그레이션 ----------
@@ -570,7 +688,9 @@ async function main() {
     '/j/home': 'journey-home.html',
     '/j/results': 'journey-results.html',
     '/j/compare': 'journey-compare.html',
-    '/j/product': 'journey-product.html'
+    '/j/product': 'journey-product.html',
+    '/iframe-host': 'iframe-host.html',
+    '/iframe-form': 'iframe-form.html'
   };
   const server = http.createServer(async (req, res) => {
     try {
@@ -629,6 +749,8 @@ async function main() {
     await runScenario('D2: urlPattern 불일치', scenarioD2Mismatch);
     await runScenario('D3: autoApply 재진입', scenarioD3AutoApply);
     await runScenario('F: 멀티페이지 여정', scenarioF);
+    await runScenario('G: 입력 팝업 확인 닫힘', scenarioGModalPopup);
+    await runScenario('H: iframe 어드민', scenarioHIframe);
     await runScenario('E: 레거시 마이그레이션', scenarioE);
   } finally {
     await context.close().catch(() => {});

@@ -10,6 +10,8 @@
   let editingGroup = null;
   let activeTab = 'presets';
   const selectedPresetIds = new Set();
+  const FILTER_KEY = 'ui:filterCurrentSite';
+  let filterCurrentSite = true;
 
   const listView = $('#presets-view');
   const editorView = $('#preset-editor-view');
@@ -17,6 +19,7 @@
   const groupEditorView = $('#group-editor-view');
   const presetList = $('#preset-list');
   const emptyState = $('#empty-state');
+  const emptyFilter = $('#empty-filter');
   const groupList = $('#group-list');
   const groupsEmpty = $('#groups-empty');
   const fieldsList = $('#fields-list');
@@ -105,6 +108,89 @@
       currentPort = '';
     }
     $('#site-chip').textContent = currentHost || '알 수 없는 사이트';
+    const blocked = isRestrictedPage();
+    ['#btn-record-site', '#btn-record-site-empty', '#btn-record-site-filter'].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.disabled = blocked;
+    });
+  }
+
+  function isRestrictedPage() {
+    return /^(chrome|chrome-extension|edge|about|devtools|moz-extension):/i.test(currentUrl || '');
+  }
+
+  function visiblePresets() {
+    if (!filterCurrentSite) return presets.slice();
+    return presets.filter((p) => presetMatchesCurrent(p));
+  }
+
+  async function loadFilterPref() {
+    try {
+      const data = await chrome.storage.local.get(FILTER_KEY);
+      if (typeof data[FILTER_KEY] === 'boolean') filterCurrentSite = data[FILTER_KEY];
+    } catch (e) {
+      filterCurrentSite = true;
+    }
+    const chk = $('#chk-filter-site');
+    if (chk) chk.checked = filterCurrentSite;
+  }
+
+  function paintPaceButtons(pace) {
+    document.querySelectorAll('.pace-btn').forEach((btn) => {
+      btn.classList.toggle('is-on', btn.dataset.pace === pace);
+    });
+  }
+
+  async function loadReplayPace() {
+    const resp = await sendMessage({ type: 'SETTINGS_GET' });
+    const pace = resp.ok && resp.data ? resp.data.replayPace : 'normal';
+    paintPaceButtons(pace === 'fast' || pace === 'slow' ? pace : 'normal');
+  }
+
+  async function refreshRecordBanner() {
+    const banner = $('#record-banner');
+    if (!banner) return;
+    const resp = await sendMessage({ type: 'RECORD_STATUS', tabId: currentTabId });
+    const data = resp && resp.ok ? resp.data : null;
+    const active = !!(data && data.active);
+    banner.classList.toggle('hidden', !active);
+    const text = $('#record-banner-text');
+    if (active && text) text.textContent = '녹화 중 · ' + (data.eventCount || 0) + '개';
+  }
+
+  function closeAllMenus(except) {
+    document.querySelectorAll('.menu').forEach((el) => {
+      if (el !== except) el.classList.add('hidden');
+    });
+    const moreBtn = $('#btn-more');
+    if (moreBtn && (!except || except.id !== 'more-menu')) moreBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  async function startRecordThisSite() {
+    if (isRestrictedPage()) {
+      showToast('이 페이지에서는 녹화할 수 없습니다.');
+      return;
+    }
+    const host = currentHost || '새 프리셋';
+    const pattern = currentPort ? currentHost + ':' + currentPort : currentHost;
+    const created = await sendMessage({
+      type: 'PRESET_CREATE',
+      name: host,
+      urlPattern: pattern || '',
+      urlPatterns: pattern ? [pattern] : []
+    });
+    if (!created.ok || !created.data) {
+      showToast('프리셋 생성 실패: ' + (created.error || ''));
+      return;
+    }
+    const resp = await sendMessage({ type: 'RECORD_START', tabId: currentTabId, presetId: created.data.id });
+    if (!resp.ok) {
+      showToast('녹화 실패: ' + resp.error);
+      return;
+    }
+    showToast('녹화 시작! 페이지에서 평소대로 한 뒤 [종료]를 누르세요.');
+    await loadPresets();
+    await refreshRecordBanner();
   }
 
   function isJourneyPreset(preset) {
@@ -353,9 +439,10 @@
       if (!known.has(id)) selectedPresetIds.delete(id);
     }
     if (!bar) return;
-    bar.classList.toggle('hidden', presets.length === 0);
-    const selected = selectedPresetIds.size;
-    const allOn = presets.length > 0 && selected === presets.length;
+    const shown = visiblePresets();
+    bar.classList.toggle('hidden', shown.length === 0);
+    const selected = shown.filter((p) => selectedPresetIds.has(p.id)).length;
+    const allOn = shown.length > 0 && selected === shown.length;
     if (allChk) {
       allChk.checked = allOn;
       allChk.indeterminate = selected > 0 && !allOn;
@@ -368,13 +455,17 @@
 
   function renderList() {
     presetList.innerHTML = '';
-    emptyState.classList.toggle('hidden', presets.length > 0);
-    if (presets.length === 0) {
+    const shown = visiblePresets();
+    const noneAtAll = presets.length === 0;
+    const noneVisible = !noneAtAll && shown.length === 0;
+    emptyState.classList.toggle('hidden', !noneAtAll);
+    if (emptyFilter) emptyFilter.classList.toggle('hidden', !noneVisible);
+    if (noneAtAll || noneVisible) {
       updateSelectBar();
       return;
     }
 
-    for (const preset of presets) {
+    for (const preset of shown) {
       const card = document.createElement('div');
       card.className = 'preset-card' + (presetMatchesCurrent(preset) ? ' is-matching' : '');
 
@@ -397,9 +488,14 @@
         buildFieldCopyRows(preset.fields) +
         '<div class="preset-actions">' +
         '<button class="btn btn-primary" data-act="replay" data-id="' + escapeHtml(preset.id) + '">재생</button>' +
-        '<button class="btn" data-act="record" data-id="' + escapeHtml(preset.id) + '">녹화</button>' +
-        '<button class="btn" data-act="edit" data-id="' + escapeHtml(preset.id) + '">편집</button>' +
-        '<button class="btn" data-act="delete" data-id="' + escapeHtml(preset.id) + '">삭제</button>' +
+        '<div class="card-more">' +
+        '<button type="button" class="btn" data-menu-toggle aria-label="더보기">⋯</button>' +
+        '<div class="menu hidden">' +
+        '<button type="button" class="menu-item" data-act="record" data-id="' + escapeHtml(preset.id) + '">녹화</button>' +
+        '<button type="button" class="menu-item" data-act="edit" data-id="' + escapeHtml(preset.id) + '">편집</button>' +
+        '<button type="button" class="menu-item" data-act="delete" data-id="' + escapeHtml(preset.id) + '">삭제</button>' +
+        '</div>' +
+        '</div>' +
         '</div>';
 
       const selectChk = card.querySelector('[data-select-id]');
@@ -411,8 +507,21 @@
           updateSelectBar();
         });
       }
-      card.querySelectorAll('button').forEach((btn) => {
-        btn.addEventListener('click', () => handlePresetAction(btn.dataset.act, preset));
+      const menuToggle = card.querySelector('[data-menu-toggle]');
+      const menu = card.querySelector('.card-more .menu');
+      if (menuToggle && menu) {
+        menuToggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const open = menu.classList.contains('hidden');
+          closeAllMenus(open ? menu : null);
+          menu.classList.toggle('hidden', !open);
+        });
+      }
+      card.querySelectorAll('[data-act]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          closeAllMenus();
+          handlePresetAction(btn.dataset.act, preset);
+        });
       });
       card.querySelectorAll('[data-copy-idx]').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -500,8 +609,8 @@
         showToast('녹화 실패: ' + resp.error);
         return;
       }
-      showToast('녹화 시작! 검색·클릭·페이지 이동을 평소대로 한 뒤 [종료]를 누르세요.');
-      window.close();
+      showToast('녹화 시작! 페이지에서 평소대로 한 뒤 [종료]를 누르세요.');
+      await refreshRecordBanner();
     } else if (act === 'edit') {
       openEditor(preset);
     } else if (act === 'delete') {
@@ -565,6 +674,8 @@
     autoEl.checked = !!editingPreset.autoApply && !journey;
     autoEl.disabled = journey;
     autoEl.title = journey ? '여정 프리셋은 페이지 진입 시 자동 적용하지 않습니다.' : '';
+    const autoHint = $('#ed-autoapply-hint');
+    if (autoHint) autoHint.classList.toggle('hidden', !journey);
     $('#btn-delete-preset').style.display = preset ? '' : 'none';
     $('#btn-capture').disabled = !preset;
     $('#btn-record').disabled = !preset;
@@ -597,7 +708,10 @@
         ) +
         '</span>' +
         '</div>' +
-        '<div class="field-selector">' + escapeHtml(field.selector) + '</div>' +
+        (field.selector
+          ? '<button type="button" class="field-selector-toggle" data-sel-toggle>셀렉터 보기</button>' +
+            '<div class="field-selector hidden">' + escapeHtml(field.selector) + '</div>'
+          : '') +
         '<div class="field-value-row">' +
         (isBoolean
           ? '<input type="text" value="' + (field.value === 'true' ? '체크됨' : '체크 안 됨') + '" disabled>'
@@ -612,6 +726,14 @@
         editingPreset.fields.splice(idx, 1);
         renderFields();
       });
+      const selToggle = item.querySelector('[data-sel-toggle]');
+      const selBox = item.querySelector('.field-selector');
+      if (selToggle && selBox) {
+        selToggle.addEventListener('click', () => {
+          const hidden = selBox.classList.toggle('hidden');
+          selToggle.textContent = hidden ? '셀렉터 보기' : '셀렉터 숨기기';
+        });
+      }
       const sensitiveCheck = item.querySelector('[data-sensitive]');
       if (sensitiveCheck) {
         sensitiveCheck.addEventListener('change', (e) => {
@@ -752,13 +874,69 @@
   });
 
   $('#btn-new-preset').addEventListener('click', () => openEditor(null));
-  $('#btn-refresh').addEventListener('click', loadPresets);
+  ['#btn-record-site', '#btn-record-site-empty', '#btn-record-site-filter'].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.addEventListener('click', startRecordThisSite);
+  });
+  const moreBtn = $('#btn-more');
+  const moreMenu = $('#more-menu');
+  if (moreBtn && moreMenu) {
+    moreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = moreMenu.classList.contains('hidden');
+      closeAllMenus(open ? moreMenu : null);
+      moreMenu.classList.toggle('hidden', !open);
+      moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  }
+  const filterChk = $('#chk-filter-site');
+  if (filterChk) {
+    filterChk.addEventListener('change', async (e) => {
+      filterCurrentSite = !!e.target.checked;
+      try {
+        await chrome.storage.local.set({ [FILTER_KEY]: filterCurrentSite });
+      } catch (err) {
+        // 저장 실패해도 이번 세션 필터는 유지
+      }
+      renderList();
+    });
+  }
+  document.querySelectorAll('.pace-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const pace = btn.dataset.pace;
+      const resp = await sendMessage({ type: 'SETTINGS_SET', replayPace: pace });
+      if (!resp.ok) {
+        showToast('설정 저장 실패: ' + (resp.error || ''));
+        return;
+      }
+      paintPaceButtons(resp.data && resp.data.replayPace ? resp.data.replayPace : pace);
+      showToast(
+        pace === 'fast' ? '재생 속도: 빠름 (이동 후 대기 거의 없음)' : pace === 'slow' ? '재생 속도: 느림' : '재생 속도: 보통'
+      );
+    });
+  });
+  document.addEventListener('click', () => closeAllMenus());
+  const stopRecordBtn = $('#btn-stop-record');
+  if (stopRecordBtn) {
+    stopRecordBtn.addEventListener('click', async () => {
+      const resp = await sendMessage({ type: 'RECORD_STOP', tabId: currentTabId });
+      if (!resp.ok) {
+        showToast('종료 실패: ' + (resp.error || ''));
+        return;
+      }
+      const saved = resp.data && typeof resp.data.saved === 'number' ? resp.data.saved : 0;
+      showToast(saved === 0 ? '기록된 행동이 없습니다.' : '저장 완료! ' + saved + '개 행동이 기록되었습니다.');
+      await loadPresets();
+      await refreshRecordBanner();
+    });
+  }
 
   $('#chk-select-all').addEventListener('change', (e) => {
+    const shown = visiblePresets();
     if (e.target.checked) {
-      presets.forEach((p) => selectedPresetIds.add(p.id));
+      shown.forEach((p) => selectedPresetIds.add(p.id));
     } else {
-      selectedPresetIds.clear();
+      shown.forEach((p) => selectedPresetIds.delete(p.id));
     }
     renderList();
   });
@@ -789,10 +967,6 @@
     }
   });
   $('#btn-new-group').addEventListener('click', () => openGroupEditor(null));
-  $('#btn-refresh-groups').addEventListener('click', async () => {
-    await loadGroups();
-    refreshRunStatus();
-  });
 
   $('#btn-export').addEventListener('click', async () => {
     const resp = await sendMessage({ type: 'EXPORT_DATA' });
@@ -969,8 +1143,8 @@
       showToast('녹화 실패: ' + resp.error);
       return;
     }
-    showToast('녹화 시작! 검색·클릭·페이지 이동을 평소대로 한 뒤 [종료]를 누르세요.');
-    window.close();
+    showToast('녹화 시작! 페이지에서 평소대로 한 뒤 [종료]를 누르세요.');
+    await refreshRecordBanner();
   });
 
   $('#btn-save-group').addEventListener('click', async () => {
@@ -1084,7 +1258,9 @@
 
   async function init() {
     await loadContext();
-    await Promise.all([loadPresets(), loadGroups()]);
+    await loadFilterPref();
+    await loadReplayPace();
+    await Promise.all([loadPresets(), loadGroups(), refreshRecordBanner()]);
     await refreshRunStatus();
   }
 

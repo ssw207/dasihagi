@@ -17,16 +17,42 @@
       <button class="tab" data-tab="groups" id="tab-groups">그룹</button>
     </nav>
 
+    <div id="record-banner" class="record-banner hidden">
+      <span class="record-banner-dot" aria-hidden="true"></span>
+      <span id="record-banner-text">녹화 중 · 0개</span>
+      <button type="button" class="btn btn-small btn-danger" id="btn-stop-record">종료</button>
+    </div>
+
     <div id="run-status-wrap" class="hidden"></div>
 
     <section id="presets-view">
       <div class="toolbar">
-        <button class="btn" id="btn-export">내보내기</button>
-        <button class="btn" id="btn-import">가져오기</button>
+        <button class="btn btn-primary" id="btn-record-site">이 사이트 녹화</button>
+        <button class="btn" id="btn-new-preset">+ 새 프리셋</button>
+        <div class="toolbar-more">
+          <button type="button" class="btn" id="btn-more" aria-haspopup="true" aria-expanded="false">더보기</button>
+          <div class="menu hidden" id="more-menu">
+            <button type="button" class="menu-item" id="btn-export">내보내기</button>
+            <button type="button" class="menu-item" id="btn-import">가져오기</button>
+          </div>
+        </div>
         <input type="file" id="import-file" accept=".json" hidden>
-        <button class="btn btn-primary" id="btn-new-preset">+ 새 프리셋</button>
-        <button class="btn" id="btn-refresh">새로고침</button>
       </div>
+      <div class="toolbar toolbar-filter">
+        <label class="check-row filter-row">
+          <input type="checkbox" id="chk-filter-site" checked>
+          <span>현재 사이트만</span>
+        </label>
+      </div>
+      <div class="pace-row">
+        <span class="pace-label">재생 속도</span>
+        <div class="pace-seg" role="radiogroup" aria-label="재생 속도">
+          <button type="button" class="pace-btn" data-pace="fast">빠름</button>
+          <button type="button" class="pace-btn is-on" data-pace="normal">보통</button>
+          <button type="button" class="pace-btn" data-pace="slow">느림</button>
+        </div>
+      </div>
+      <p class="hint pace-hint">페이지 이동 뒤 쉬는 시간입니다. 사내처럼 제한이 없으면 빠름을 쓰세요.</p>
       <div class="toolbar toolbar-select hidden" id="preset-select-bar">
         <label class="check-row select-all-row">
           <input type="checkbox" id="chk-select-all">
@@ -37,19 +63,24 @@
       <div class="preset-list" id="preset-list"></div>
       <div class="empty-state" id="empty-state">
         <p>아직 프리셋이 없습니다.</p>
-        <p class="hint">프리셋을 만든 뒤 <strong>녹화</strong>로 입력·클릭·이동을 기록하세요. 입력란만 저장하려면 캡처를 사용합니다.</p>
+        <p class="hint">아래 버튼으로 바로 녹화를 시작하세요. 입력란만 저장하려면 새 프리셋을 만든 뒤 캡처를 사용합니다.</p>
+        <button type="button" class="btn btn-primary" id="btn-record-site-empty">이 사이트 녹화</button>
+      </div>
+      <div class="empty-state hidden" id="empty-filter">
+        <p>이 사이트에 맞는 프리셋이 없습니다.</p>
+        <p class="hint">녹화를 시작하거나, 위 토글에서 전체 목록을 볼 수 있습니다.</p>
+        <button type="button" class="btn btn-primary" id="btn-record-site-filter">이 사이트 녹화</button>
       </div>
     </section>
 
     <section id="groups-view" class="hidden">
       <div class="toolbar">
         <button class="btn btn-primary" id="btn-new-group">+ 새 그룹</button>
-        <button class="btn" id="btn-refresh-groups">새로고침</button>
       </div>
       <div class="group-list" id="group-list"></div>
       <div class="empty-state" id="groups-empty">
         <p>아직 그룹이 없습니다.</p>
-        <p class="hint">여러 페이지(A, B, C)를 순서대로 채우고 저장하려면 그룹을 만드세요.</p>
+        <p class="hint">폼만 여러 사이트에서 채울 때는 그룹을 쓰세요. 클릭·검색·페이지 이동까지면 여정 녹화가 맞습니다.</p>
       </div>
     </section>
 
@@ -68,6 +99,7 @@
           <input type="checkbox" id="ed-autoapply">
           <span>페이지 진입 시 자동 적용</span>
         </label>
+        <p class="hint hidden" id="ed-autoapply-hint">여정 프리셋은 페이지 진입 시 자동 적용하지 않습니다. 목록에서 재생하세요.</p>
 
         <div class="fields-head">
           <h3>저장된 필드 <span class="field-count" id="field-count">0</span></h3>
@@ -76,7 +108,7 @@
         </div>
         <div class="fields-list" id="fields-list"></div>
         <div class="fields-empty" id="fields-empty">아직 저장된 필드가 없습니다.</div>
-        <p class="hint">저장되는 모든 값은 AES-256-GCM으로 암호화됩니다. 필드의 "민감" 체크박스는 목록에서 값이 •••••• 로 가려지도록 하는 표시용 설정입니다.</p>
+        <p class="hint">저장값은 암호화됩니다. 민감 체크는 목록에서 값을 가립니다.</p>
 
         <div class="editor-actions">
           <button class="btn btn-danger" id="btn-delete-preset" style="display:none">프리셋 삭제</button>
@@ -106,7 +138,7 @@
           <select id="ge-preset-select"></select>
           <button class="btn btn-small btn-primary" id="btn-add-step">+ 스텝 추가</button>
         </div>
-        <p class="hint">그룹 실행 시 각 스텝의 페이지가 새 탭으로 열리고 프리셋이 적용됩니다.</p>
+        <p class="hint">그룹 실행 시 각 스텝의 페이지가 새 탭으로 열리고 폼이 채워집니다. 클릭·이동이 필요하면 여정 녹화를 쓰세요.</p>
 
         <div class="editor-actions">
           <button class="btn btn-danger" id="btn-delete-group" style="display:none">그룹 삭제</button>

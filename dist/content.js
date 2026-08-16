@@ -379,8 +379,18 @@
 
   const RECORD_MAX_DELAY = 5000;
 
+  function shouldShowRecordChip() {
+    try {
+      if (window === window.top) return true;
+      return window.innerWidth >= 240 && window.innerHeight >= 160;
+    } catch (e) {
+      return true;
+    }
+  }
+
   function showRecordChip() {
     if (recordChipEl) return;
+    if (!shouldShowRecordChip()) return;
     recordChipEl = document.createElement('div');
     recordChipEl.className = 'fp-record-chip';
     recordChipEl.innerHTML =
@@ -652,14 +662,27 @@
     });
   }
 
-  async function replaySequential(preset) {
+  function paceDelayMs(raw, pace) {
+    const d = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), RECORD_MAX_DELAY) : 150;
+    if (pace === 'fast') return Math.min(d, 40);
+    if (pace === 'slow') return Math.min(Math.round(d * 1.5) + 200, RECORD_MAX_DELAY);
+    return d;
+  }
+
+  function paceWaitElementMs(pace) {
+    if (pace === 'fast') return 2500;
+    if (pace === 'slow') return 8000;
+    return 5000;
+  }
+
+  async function replaySequential(preset, replayPace) {
     const fields = Array.isArray(preset.fields) ? preset.fields : [];
     const applied = [];
     const failures = [];
+    const waitEl = paceWaitElementMs(replayPace);
     for (const field of fields) {
-      const delay = Number.isFinite(field.delay) ? Math.min(Math.max(field.delay, 0), RECORD_MAX_DELAY) : 150;
-      await sleep(delay);
-      const el = await waitForElement(field.selector, 5000);
+      await sleep(paceDelayMs(field.delay, replayPace));
+      const el = await waitForElement(field.selector, waitEl);
       if (!el) {
         failures.push({ ok: false, label: field.label, reason: '요소를 찾을 수 없음' });
         continue;
@@ -803,10 +826,10 @@
     return { ok: true, label: field.label };
   }
 
-  function applyPreset(preset) {
+  function applyPreset(preset, replayPace) {
     // 녹화된 필드(delay 포함)는 순차 재생 — 기록된 순서와 타이밍대로 적용
     const hasDelay = Array.isArray(preset.fields) && preset.fields.some((f) => Number.isFinite(f.delay));
-    if (hasDelay) return replaySequential(preset);
+    if (hasDelay) return replaySequential(preset, replayPace);
 
     return new Promise((resolve) => {
       const failures = [];
@@ -947,9 +970,10 @@
     }
     if (msg.type === 'APPLY_ACTION') {
       const field = msg.field;
+      const waitMs = Number.isFinite(msg.waitMs) ? msg.waitMs : 5000;
       const run = async () => {
         if (field && field.selector && field.type !== 'navigate') {
-          await waitForElement(field.selector, 5000);
+          await waitForElement(field.selector, waitMs);
         }
         return applyField(field);
       };
@@ -959,7 +983,7 @@
       return true;
     }
     if (msg.type === 'APPLY_PRESET') {
-      applyPreset(msg.preset).then((result) => {
+      applyPreset(msg.preset, msg.replayPace).then((result) => {
         sendResponse({ result: result });
       });
       return true;

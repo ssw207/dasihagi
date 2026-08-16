@@ -3,7 +3,7 @@
   "name": "폼 프리셋",
   "version": "0.1.0",
   "description": "사이트별 폼 자동 세팅 프리셋. 원하는 인풋을 클릭해 값을 저장하고 한 번에 적용하세요.",
-  "permissions": ["storage", "tabs", "scripting"],
+  "permissions": ["storage", "tabs", "scripting", "webNavigation"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -15,6 +15,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
+      "all_frames": true,
       "js": ["pii-detect.js", "content.js"],
       "run_at": "document_idle"
     }
