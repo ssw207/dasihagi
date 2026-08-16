@@ -98,18 +98,18 @@ runState = {
 
 ## TODOs
 
-- [ ] T1: worktree 베이스 커밋 (완료: 65ce064)
-- [ ] T2: background.js — groups CRUD + 실행 상태 머신
-- [ ] T3: content.js — 버튼 캡처 + SUBMIT_FORM
-- [ ] T4: popup UI — 탭 전환 + 그룹 목록/편집/실행 상태
-- [ ] T5: popup.css — 그룹 스타일
-- [ ] T6: 검증 — node --check, build, 수동 테스트 플로우
+- [x] T1: worktree 베이스 커밋 (완료: 65ce064)
+- [x] T2: background.js — groups CRUD + 실행 상태 머신
+- [x] T3: content.js — 버튼 캡처 + SUBMIT_FORM
+- [x] T4: popup UI — 탭 전환 + 그룹 목록/편집/실행 상태
+- [x] T5: popup.css — 그룹 스타일
+- [x] T6: 검증 — node --check, build, 수동 테스트 플로우
 
 ## Definition of Done
 
-- [ ] 그룹 CRUD 동작
-- [ ] 그룹 실행: 새 탭 열기 → 프리셋 적용 → (auto) 제출 클릭 → 다음 스텝
-- [ ] manual 스텝에서 "다음 단계"로 진행
-- [ ] 실행 중 popup 재오픈 시 상태 복원
-- [ ] 중지 시 탭 정리
-- [ ] node --check 전 파일 통과, build 성공
+- [x] 그룹 CRUD 동작
+- [x] 그룹 실행: 새 탭 열기 → 프리셋 적용 → (auto) 제출 클릭 → 다음 스텝
+- [x] manual 스텝에서 "다음 단계"로 진행
+- [x] 실행 중 popup 재오픈 시 상태 복원
+- [x] 중지 시 탭 정리
+- [x] node --check 전 파일 통과, build 성공

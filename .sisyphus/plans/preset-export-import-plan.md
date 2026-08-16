@@ -88,19 +88,19 @@ popup.js ── chrome.runtime.sendMessage({type, ...}) ──▶ background.js 
 
 ### 3-5. 엣지 케이스 체크리스트
 
-- [ ] 파일이 비어 있거나 0바이트
-- [ ] 확장자가 `.json`이 아닌 파일 (accept 속성으로 대부분 차단, 그래도 검증은 동작)
-- [ ] 손상된 JSON (파싱 실패)
-- [ ] `schemaVersion` 누락/문자열/미래 버전
-- [ ] `presets`/`groups`가 배열이 아님 (객체/문자열)
-- [ ] 프리셋에 `name` 없는 경우 / 필드에 `selector` 없는 경우
-- [ ] 그룹이 참조하는 프리셋이 가져온 파일에 없음 → step 제거 후 가져오기
-- [ ] 동일 이름 프리셋이 이미 존재 → 중복 허용(새 ID) — 사용자에게 안내 문구
-- [ ] 가져오기 중 `chrome.storage` 오류 (`runtime.lastError`)
-- [ ] 5MB 초과 파일
-- [ ] 유니코드/한글/이모지 이름 (JSON 직렬화에서 안전)
-- [ ] 같은 파일 연속 가져오기 → 중복이 계속 늘어남 (안내 문구로 인지 가능하게)
-- [ ] 프리셋이 0개인 상태에서 내보내기 → "내보낼 데이터가 없습니다"
+- [x] 파일이 비어 있거나 0바이트
+- [x] 확장자가 `.json`이 아닌 파일 (accept 속성으로 대부분 차단, 그래도 검증은 동작)
+- [x] 손상된 JSON (파싱 실패)
+- [x] `schemaVersion` 누락/문자열/미래 버전
+- [x] `presets`/`groups`가 배열이 아님 (객체/문자열)
+- [x] 프리셋에 `name` 없는 경우 / 필드에 `selector` 없는 경우
+- [x] 그룹이 참조하는 프리셋이 가져온 파일에 없음 → step 제거 후 가져오기
+- [x] 동일 이름 프리셋이 이미 존재 → 중복 허용(새 ID) — 사용자에게 안내 문구
+- [x] 가져오기 중 `chrome.storage` 오류 (`runtime.lastError`)
+- [x] 5MB 초과 파일
+- [x] 유니코드/한글/이모지 이름 (JSON 직렬화에서 안전)
+- [x] 같은 파일 연속 가져오기 → 중복이 계속 늘어남 (안내 문구로 인지 가능하게)
+- [x] 프리셋이 0개인 상태에서 내보내기 → "내보낼 데이터가 없습니다"
 
 ## 4. 구현 단계
 
@@ -151,12 +151,12 @@ npm run build   # dist 생성 확인
 
 ## 6. 완료 기준 (Definition of Done)
 
-- [ ] `EXPORT_DATA`/`IMPORT_DATA` 메시지가 `background.js`에 구현됨
-- [ ] 내보내기: Blob 다운로드, 파일명 규칙, `revokeObjectURL` 정리
-- [ ] 가져오기: 검증 8단계, ID 재매핑, confirm 확인 단계
-- [ ] `npm run check` 통과
-- [ ] 수동 테스트 6개 시나리오 통과
-- [ ] 기존 기능(프리셋 CRUD, 그룹 실행, 캡처 모드) 회귀 없음
+- [x] `EXPORT_DATA`/`IMPORT_DATA` 메시지가 `background.js`에 구현됨
+- [x] 내보내기: Blob 다운로드, 파일명 규칙, `revokeObjectURL` 정리
+- [x] 가져오기: 검증 8단계, ID 재매핑, confirm 확인 단계
+- [x] `npm run check` 통과
+- [x] 수동 테스트 6개 시나리오 통과
+- [x] 기존 기능(프리셋 CRUD, 그룹 실행, 캡처 모드) 회귀 없음
 
 ## 7. 리스크 및 열린 질문
 
