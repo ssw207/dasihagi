@@ -4,7 +4,7 @@
  * 브라우저 없이 mock chrome API로 실제 background.js(+secure-store.js)를 구동해
  * 프리셋별 전체 암호화(sec:preset:<id> blob) 저장/복호화/재암호화/정리/마이그레이션을 검증한다.
  *
- * 저장 모델: presets = 평문 인덱스 [{id,name,urlPattern,autoApply,updatedAt}]
+ * 저장 모델: presets = 평문 인덱스 [{id,name,urlPattern,urlPatterns,autoApply,updatedAt}]
  *           sec:preset:<id> = 프리셋 전체(모든 필드 값) AES-256-GCM 암호화 blob
  *           field.sensitive = 마스킹 표시 신호 (저장 보호와 무관)
  *
@@ -526,6 +526,55 @@ await scenario('S10: AUTO_APPLY_CHECK 인덱스 매칭 + 복호화', async () =>
 
   const none = await call('AUTO_APPLY_CHECK', { url: 'https://other.com/form' });
   assert.strictEqual(none.length, 0, '비매칭 URL이면 빈 배열');
+});
+
+// ---- S11: PRESET_DELETE_MANY + 그룹 스텝 정리 ----
+await scenario('S11: PRESET_DELETE_MANY 여러 개 삭제 + 그룹 스텝 정리', async () => {
+  const a = await createPreset('S11-A', 'example.com');
+  const b = await createPreset('S11-B', 'example.com');
+  const keep = await createPreset('S11-KEEP', 'example.com');
+  await saveSensitiveField(a.id, {
+    id: 'fa',
+    label: '비밀번호',
+    selector: '#pwd',
+    value: 'secret-a',
+    type: 'text',
+    sensitive: true
+  });
+  const group = await call('GROUP_CREATE', {
+    name: 'S11 그룹',
+    steps: [
+      { presetId: a.id, submitMode: 'manual' },
+      { presetId: b.id, submitMode: 'manual' },
+      { presetId: keep.id, submitMode: 'manual' }
+    ]
+  });
+  assert(group && group.id, '그룹 생성');
+
+  let emptyFailed = false;
+  try {
+    await call('PRESET_DELETE_MANY', { ids: [] });
+  } catch (e) {
+    emptyFailed = String(e.message || '').includes('선택');
+  }
+  assert(emptyFailed, '빈 선택은 오류여야 함');
+
+  const result = await call('PRESET_DELETE_MANY', { ids: [a.id, b.id, a.id] });
+  assert.strictEqual(result.deleted, 2, '중복 id는 한 번만 삭제');
+
+  const dump = storageDump();
+  assert(!dump['sec:preset:' + a.id], 'A blob 제거');
+  assert(!dump['sec:preset:' + b.id], 'B blob 제거');
+  assert(dump['sec:preset:' + keep.id], 'KEEP blob 유지');
+  assert(!dump.presets.find((p) => p.id === a.id), 'A 인덱스 제거');
+  assert(!dump.presets.find((p) => p.id === b.id), 'B 인덱스 제거');
+  assert(dump.presets.find((p) => p.id === keep.id), 'KEEP 인덱스 유지');
+
+  const groups = await call('GROUP_LIST', {});
+  const g = groups.find((x) => x.id === group.id);
+  assert(g, '그룹 유지');
+  assert.strictEqual(g.steps.length, 1, '삭제된 프리셋 스텝만 제거');
+  assert.strictEqual(g.steps[0].presetId, keep.id, '남은 스텝은 KEEP');
 });
 
 // ============================================================

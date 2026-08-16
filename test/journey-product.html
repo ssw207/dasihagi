@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>상품</title></head>
+<body>
+  <h1 id="product-title">상품</h1>
+  <p>선택 ID: <span id="product-id"></span></p>
+  <script>
+    const id = new URLSearchParams(location.search).get('id') || '';
+    document.getElementById('product-id').textContent = id;
+    document.getElementById('product-title').textContent = '상품 선택됨 #' + id;
+  </script>
+</body>
+</html>

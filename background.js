@@ -1,4 +1,4 @@
-import { setSecret, getSecret, deleteSecret } from './secure-store.js';
+import { setSecret, getSecret, deleteSecret, getVaultKeyStatus } from './secure-store.js';
 
 const STORAGE_KEY = 'presets';
 const GROUPS_KEY = 'groups';
@@ -6,10 +6,20 @@ const RUN_KEY = 'runState';
 const EXPORT_SCHEMA_VERSION = 1;
 const MAX_IMPORT_PRESETS = 500;
 const MAX_IMPORT_GROUPS = 100;
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024; // IMPORT_DATA 총 크기 상한 (5MB)
+const MAX_FIELDS_PER_PRESET = 500; // 프리셋당 필드 수 상한
+const MAX_FIELD_VALUE_LENGTH = 64 * 1024; // 필드 값 크기 상한 (64KB)
+const MAX_URL_PATTERNS = 20; // 프리셋당 허용 사이트 상한
 const captureTabs = new Set();
-const recordTabs = new Set();
+const RECORD_SESSIONS_KEY = 'recordSessions';
+const RECORD_MAX_DELAY = 5000;
+
+let recordSessions = {}; // tabId → { presetId, events, lastRecordAt, startUrl, lastUrl, allowedSites }
+let journeyReplayTabId = null;
+const tabCompleteWaiters = [];
 
 let runState = null;
+let groupRunInFlight = false; // RUN_GROUP 이중 진입 방지 (첫 await 전 동기 선점)
 
 async function persistRunState() {
   try {
@@ -49,7 +59,21 @@ async function getPresetById(id) {
   const raw = await getSecret('preset:' + id);
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const preset = JSON.parse(raw);
+    // 구조 무결성 검증 — 저장소 변조 시 popup 크래시 방지 (C8)
+    if (!preset || typeof preset !== 'object' || !Array.isArray(preset.fields)) return null;
+    const fields = [];
+    for (const f of preset.fields) {
+      if (!f || typeof f !== 'object') return null;
+      fields.push({
+        ...f,
+        label: typeof f.label === 'string' ? f.label : String(f.label == null ? '필드' : f.label),
+        selector: typeof f.selector === 'string' ? f.selector : String(f.selector || ''),
+        value: f.value == null ? '' : String(f.value)
+      });
+    }
+    preset.fields = fields;
+    return preset;
   } catch (e) {
     return null;
   }
@@ -68,24 +92,72 @@ async function getAllPresets() {
 // 프리셋 전체를 통째로 암호화 저장 + 평문 인덱스 갱신
 async function savePreset(preset) {
   await setSecret('preset:' + preset.id, JSON.stringify(preset));
-  const index = await getPresetIndex();
-  const idx = index.findIndex((p) => p.id === preset.id);
-  const entry = {
-    id: preset.id,
-    name: preset.name,
-    urlPattern: preset.urlPattern,
-    autoApply: !!preset.autoApply,
-    updatedAt: preset.updatedAt || Date.now()
-  };
-  if (idx === -1) index.push(entry);
-  else index[idx] = entry;
-  await savePresetIndex(index);
+  try {
+    const index = await getPresetIndex();
+    const idx = index.findIndex((p) => p.id === preset.id);
+    normalizePresetPatterns(preset);
+    const entry = {
+      id: preset.id,
+      name: preset.name,
+      urlPattern: preset.urlPattern,
+      urlPatterns: getPresetPatterns(preset),
+      autoApply: !!preset.autoApply,
+      updatedAt: preset.updatedAt || Date.now()
+    };
+    if (idx === -1) index.push(entry);
+    else index[idx] = entry;
+    await savePresetIndex(index);
+  } catch (e) {
+    // 인덱스 쓰기 실패 시 방금 쓴 blob을 롤백해 고아 blob/불일치 방지 (Q2)
+    try {
+      await deleteSecret('preset:' + preset.id);
+    } catch (rollbackErr) {
+      // 롤백 실패는 원래 오류를 우선 전파
+    }
+    throw e;
+  }
 }
 
 async function deletePreset(id) {
   await deleteSecret('preset:' + id);
   const index = await getPresetIndex();
   await savePresetIndex(index.filter((p) => p.id !== id));
+}
+
+function normalizeDeleteIds(ids) {
+  const seen = new Set();
+  const out = [];
+  const raw = Array.isArray(ids) ? ids : [];
+  for (const id of raw) {
+    if (typeof id !== 'string' || !id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= MAX_IMPORT_PRESETS) break;
+  }
+  return out;
+}
+
+async function removePresetIdsFromGroups(idSet) {
+  if (!idSet || idSet.size === 0) return;
+  const groups = await getGroups();
+  let changed = false;
+  for (const g of groups) {
+    if (!Array.isArray(g.steps)) continue;
+    const before = g.steps.length;
+    g.steps = g.steps.filter((s) => !idSet.has(s.presetId));
+    if (g.steps.length !== before) changed = true;
+  }
+  if (changed) await saveGroups(groups);
+}
+
+async function deletePresets(ids) {
+  const unique = normalizeDeleteIds(ids);
+  if (unique.length === 0) throw new Error('삭제할 프리셋을 선택해주세요.');
+  for (const id of unique) {
+    await deletePreset(id);
+  }
+  await removePresetIdsFromGroups(new Set(unique));
+  return { deleted: unique.length };
 }
 
 async function getGroups() {
@@ -97,8 +169,247 @@ async function saveGroups(groups) {
   await chrome.storage.local.set({ [GROUPS_KEY]: groups });
 }
 
+function sessionKey(tabId) {
+  return String(tabId);
+}
+
+function getRecordSession(tabId) {
+  return recordSessions[sessionKey(tabId)] || null;
+}
+
+function setRecordSession(tabId, session) {
+  recordSessions[sessionKey(tabId)] = session;
+}
+
+function deleteRecordSession(tabId) {
+  delete recordSessions[sessionKey(tabId)];
+}
+
+async function persistRecordSessions() {
+  try {
+    await chrome.storage.session.set({ [RECORD_SESSIONS_KEY]: recordSessions });
+  } catch (e) {
+    // session 저장 실패 시 메모리 세션만 유지
+  }
+}
+
+async function restoreRecordSessions() {
+  try {
+    const data = await chrome.storage.session.get(RECORD_SESSIONS_KEY);
+    const raw = data[RECORD_SESSIONS_KEY];
+    recordSessions = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (e) {
+    recordSessions = {};
+  }
+}
+
+function isJourneyPreset(preset) {
+  return !!(
+    preset &&
+    Array.isArray(preset.fields) &&
+    preset.fields.some((f) => f && (f.type === 'click' || f.type === 'keydown' || f.type === 'navigate'))
+  );
+}
+
+function normalizeNavUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    let href = u.href;
+    if (href.endsWith('/')) href = href.slice(0, -1);
+    return href;
+  } catch (e) {
+    return String(url || '');
+  }
+}
+
+function normalizeRecordEvent(e) {
+  return {
+    id: e.id || crypto.randomUUID(),
+    label: e.label || '필드',
+    selector: typeof e.selector === 'string' ? e.selector : '',
+    value: e.value == null ? '' : String(e.value),
+    type: e.type || 'text',
+    delay: e.delay,
+    sensitive: !!e.sensitive
+  };
+}
+
+function appendSessionEvent(session, raw) {
+  const field = normalizeRecordEvent(raw);
+  if (field.type === 'navigate') {
+    const lastNav = session.events[session.events.length - 1];
+    if (lastNav && lastNav.type === 'navigate' && lastNav.value === field.value) {
+      return session.events.length;
+    }
+  }
+  const now = Date.now();
+  const delay = session.lastRecordAt ? Math.min(now - session.lastRecordAt, RECORD_MAX_DELAY) : 0;
+  session.lastRecordAt = now;
+  const last = session.events[session.events.length - 1];
+  const mergeable = field.type !== 'click' && field.type !== 'keydown' && field.type !== 'navigate';
+  if (mergeable && last && last.selector === field.selector && last.type === field.type) {
+    last.value = field.value;
+    last.sensitive = !!(last.sensitive || field.sensitive);
+    return session.events.length;
+  }
+  if (session.events.length >= MAX_FIELDS_PER_PRESET) {
+    return session.events.length;
+  }
+  field.delay = delay;
+  session.events.push(field);
+  return session.events.length;
+}
+
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    const entry = {
+      tabId,
+      resolve,
+      timer: setTimeout(() => {
+        const idx = tabCompleteWaiters.indexOf(entry);
+        if (idx !== -1) tabCompleteWaiters.splice(idx, 1);
+        resolve(false);
+      }, timeoutMs)
+    };
+    tabCompleteWaiters.push(entry);
+  });
+}
+
+function notifyTabComplete(tabId) {
+  for (let i = tabCompleteWaiters.length - 1; i >= 0; i--) {
+    const waiter = tabCompleteWaiters[i];
+    if (waiter.tabId === tabId) {
+      clearTimeout(waiter.timer);
+      tabCompleteWaiters.splice(i, 1);
+      waiter.resolve(true);
+    }
+  }
+}
+
+async function navigateTab(tabId, url) {
+  const tab = await chrome.tabs.get(tabId);
+  if (normalizeNavUrl(tab.url) === normalizeNavUrl(url)) return true;
+  const waited = waitForTabComplete(tabId, 15000);
+  await chrome.tabs.update(tabId, { url });
+  return waited;
+}
+
+async function appendNavigateIfRecording(tabId, url) {
+  const session = getRecordSession(tabId);
+  if (!session || !url) return;
+  if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) return;
+  if (session.lastUrl && normalizeNavUrl(session.lastUrl) === normalizeNavUrl(url)) return;
+  session.lastUrl = url;
+  rememberSessionSite(session, url);
+  appendSessionEvent(session, {
+    id: crypto.randomUUID(),
+    label: '페이지 이동',
+    selector: '',
+    value: url,
+    type: 'navigate'
+  });
+  await persistRecordSessions();
+}
+
+async function resumeRecordingIfNeeded(tabId) {
+  const session = getRecordSession(tabId);
+  if (!session) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'RECORD_START',
+      presetId: session.presetId,
+      resume: true,
+      eventCount: session.events.length
+    });
+  } catch (e) {
+    // content script가 아직 없으면 다음 complete에서 재시도
+  }
+}
+
+async function resumeAllRecordChips() {
+  const ids = Object.keys(recordSessions);
+  for (const id of ids) {
+    const tabId = Number(id);
+    if (!Number.isFinite(tabId)) continue;
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab && tab.status === 'complete') await resumeRecordingIfNeeded(tabId);
+    } catch (e) {
+      deleteRecordSession(tabId);
+    }
+  }
+  await persistRecordSessions();
+}
+
+async function replayJourney(tabId, preset) {
+  const fields = Array.isArray(preset.fields) ? preset.fields : [];
+  const applied = [];
+  const failures = [];
+  journeyReplayTabId = tabId;
+  try {
+    if (preset.startUrl) {
+      const moved = await navigateTab(tabId, preset.startUrl);
+      if (!moved) {
+        failures.push({ ok: false, label: '시작 페이지', reason: '시작 페이지로 이동하지 못했습니다.' });
+        return { applied, failures };
+      }
+    }
+    for (const field of fields) {
+      const delay = Number.isFinite(field.delay) ? Math.min(Math.max(field.delay, 0), RECORD_MAX_DELAY) : 150;
+      await new Promise((r) => setTimeout(r, delay));
+      if (field.type === 'navigate') {
+        try {
+          const moved = await navigateTab(tabId, field.value);
+          if (!moved) {
+            failures.push({ ok: false, label: field.label, reason: '페이지 이동 시간 초과' });
+            continue;
+          }
+          applied.push({ ok: true, label: field.label });
+        } catch (e) {
+          failures.push({
+            ok: false,
+            label: field.label,
+            reason: e && e.message ? e.message : '페이지 이동 실패'
+          });
+        }
+        continue;
+      }
+      try {
+        const resp = await chrome.tabs.sendMessage(tabId, { type: 'APPLY_ACTION', field });
+        const res = resp && resp.result;
+        if (res && res.ok) {
+          applied.push(res);
+        } else {
+          failures.push(res || { ok: false, label: field.label, reason: '적용 실패' });
+        }
+      } catch (e) {
+        const moved = await waitForTabComplete(tabId, 8000);
+        if (moved) {
+          applied.push({ ok: true, label: field.label });
+        } else {
+          failures.push({ ok: false, label: field.label, reason: '페이지와 통신할 수 없습니다.' });
+        }
+      }
+    }
+    return { applied, failures };
+  } finally {
+    journeyReplayTabId = null;
+  }
+}
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// IDN/유니코드 도메인을 punycode(url.hostname 형식)로 정규화 (Edge-1 ④)
+function normalizeHost(host) {
+  if (!/[^\x00-\x7F]/.test(host)) return host;
+  try {
+    return new URL('http://' + host).hostname;
+  } catch (e) {
+    return host;
+  }
 }
 
 function matchUrlPattern(pattern, urlStr) {
@@ -126,22 +437,47 @@ function matchUrlPattern(pattern, urlStr) {
     pathPat = p.slice(slashIdx);
   }
 
-  // 패턴에 포트(:port)가 포함되면 url.hostname(포트 없음)과 비교가 무력화됨 — 브라우저 E2E에서 발견.
-  // 포트를 추출해 별도 비교 (패턴에 포트가 있으면 포트도 일치해야 매칭, 없으면 모든 포트 허용)
+  // ① IPv6 [::1]:8080 — 괄호 IPv6를 먼저 처리해 포트 제거 정규식이 IPv6를 망가뜨리지 않게 함
   let patPort = '';
-  const portMatch = hostPat.match(/:(\d+)$/);
-  if (portMatch) {
-    patPort = portMatch[1];
-    hostPat = hostPat.slice(0, portMatch.index);
+  if (hostPat.startsWith('[')) {
+    const closeIdx = hostPat.indexOf(']');
+    if (closeIdx !== -1) {
+      const rest = hostPat.slice(closeIdx + 1);
+      const portMatch = rest.match(/^:(\d+)$/);
+      if (portMatch) {
+        patPort = portMatch[1];
+        hostPat = hostPat.slice(0, closeIdx + 1);
+      }
+    }
+  } else {
+    const portMatch = hostPat.match(/:(\d+)$/);
+    if (portMatch) {
+      patPort = portMatch[1];
+      hostPat = hostPat.slice(0, portMatch.index);
+    }
   }
-  hostPat = hostPat.replace(/\[([^\]]+)\].*/, '$1');
-  const portOk = patPort === '' || patPort === url.port;
+
+  // ③ * 단독 패턴은 모든 URL 매칭
+  if (hostPat === '*') return true;
+
+  // ④ IDN/유니코드 도메인 정규화 (url.hostname은 punycode)
+  let hostPatNorm = hostPat;
+  if (hostPatNorm.startsWith('*.')) {
+    hostPatNorm = '*.' + normalizeHost(hostPatNorm.slice(2));
+  } else {
+    hostPatNorm = normalizeHost(hostPatNorm);
+  }
+
+  // ⑤ 포트 처리 — URL 기본 포트(80/443)는 명시적 포트와 동일 취급
+  const urlPort = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
+  const portOk = patPort === '' || patPort === urlPort;
+
   let hostMatched;
-  if (hostPat.startsWith('*.')) {
-    const base = hostPat.slice(2);
+  if (hostPatNorm.startsWith('*.')) {
+    const base = hostPatNorm.slice(2);
     hostMatched = (host === base || host.endsWith('.' + base)) && portOk;
   } else {
-    hostMatched = host === hostPat && portOk;
+    hostMatched = host === hostPatNorm && portOk;
   }
   if (!hostMatched) return false;
 
@@ -150,13 +486,109 @@ function matchUrlPattern(pattern, urlStr) {
     const re = new RegExp('^' + pathPat.split('*').map(escapeRegExp).join('.*') + '$');
     return re.test(path);
   }
-  return path === pathPat;
+  // ② trailing slash: example.com/admin 패턴이 example.com/admin/ URL과도 매칭
+  return path === pathPat || path.replace(/\/+$/, '') === pathPat;
+}
+
+function isRestrictedRecordUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') return true;
+  return /^(chrome|chrome-extension|edge|about|devtools|moz-extension):/i.test(urlStr);
+}
+
+function urlToSitePattern(urlStr) {
+  if (isRestrictedRecordUrl(urlStr)) return '';
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    const host = u.hostname.toLowerCase();
+    if (!host) return '';
+    return u.port ? host + ':' + u.port : host;
+  } catch (e) {
+    return '';
+  }
+}
+
+function normalizePatternList(patterns) {
+  const out = [];
+  const seen = new Set();
+  const raw = Array.isArray(patterns) ? patterns : [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const p = item.trim();
+    if (!p) continue;
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+    if (out.length >= MAX_URL_PATTERNS) break;
+  }
+  return out;
+}
+
+function getPresetPatterns(preset) {
+  if (!preset) return [];
+  const fromArr = normalizePatternList(preset.urlPatterns);
+  if (fromArr.length) return fromArr;
+  if (typeof preset.urlPattern === 'string' && preset.urlPattern.trim()) {
+    return normalizePatternList([preset.urlPattern]);
+  }
+  return [];
+}
+
+function normalizePresetPatterns(preset) {
+  if (!preset || typeof preset !== 'object') return preset;
+  const list = getPresetPatterns(preset);
+  preset.urlPatterns = list;
+  preset.urlPattern = list[0] || (typeof preset.urlPattern === 'string' ? preset.urlPattern : '');
+  return preset;
+}
+
+function syntheticUrlsForPattern(pattern) {
+  const p = String(pattern || '').trim();
+  if (!p) return [];
+  if (/^[a-z]+:\/\//i.test(p)) return [p];
+  return ['https://' + p, 'http://' + p];
+}
+
+function patternCoversPattern(existing, incoming) {
+  if (!existing || !incoming) return false;
+  if (existing.trim().toLowerCase() === incoming.trim().toLowerCase()) return true;
+  return syntheticUrlsForPattern(incoming).some((u) => matchUrlPattern(existing, u));
+}
+
+function mergeUrlPatterns(existingPatterns, incomingPatterns) {
+  const next = normalizePatternList(existingPatterns);
+  for (const incoming of normalizePatternList(incomingPatterns)) {
+    if (next.some((e) => patternCoversPattern(e, incoming))) continue;
+    next.push(incoming);
+    if (next.length >= MAX_URL_PATTERNS) break;
+  }
+  return next;
+}
+
+function matchAnyUrlPattern(patterns, urlStr) {
+  return normalizePatternList(patterns).some((p) => matchUrlPattern(p, urlStr));
+}
+
+function matchPresetUrl(preset, urlStr) {
+  return matchAnyUrlPattern(getPresetPatterns(preset), urlStr);
+}
+
+function rememberSessionSite(session, urlStr) {
+  if (!session) return;
+  const pat = urlToSitePattern(urlStr);
+  if (!pat) return;
+  if (!Array.isArray(session.allowedSites)) session.allowedSites = [];
+  session.allowedSites = mergeUrlPatterns(session.allowedSites, [pat]);
 }
 
 function patternToUrl(pattern) {
   let p = String(pattern || '').trim();
   if (!p) return null;
-  if (!/^[a-z]+:\/\//i.test(p)) p = 'https://' + p;
+  if (/^[a-z]+:\/\//i.test(p)) return p;
+  // 스킴 없음: 호스트에 포트가 있으면 http:// (로컬 개발/인트라넷), 없으면 https:// (UX-3)
+  const hostPart = p.split('/')[0];
+  p = (/:\d+$/.test(hostPart) ? 'http://' : 'https://') + p;
   return p;
 }
 
@@ -254,9 +686,9 @@ async function startCurrentStep() {
   runState.currentStep = {
     presetId: preset.id,
     presetName: preset.name,
-    preset: preset,
     submitMode: step.submitMode || 'manual',
-    submitSelector: step.submitSelector || ''
+    submitSelector: step.submitSelector || '',
+    applied: false // 같은 스텝의 complete 이벤트 중복 처리 방지 (Flow-13)
   };
   runState.status = 'running';
   updateRunBadge();
@@ -266,9 +698,16 @@ async function startCurrentStep() {
 async function handleStepTabLoaded(tabId) {
   if (!runState || runState.status !== 'running') return;
   if (runState.currentTabId !== tabId || !runState.currentStep) return;
+  if (runState.currentStep.applied) return; // 같은 스텝의 complete 이벤트 중복 처리 방지 (Flow-13)
+  runState.currentStep.applied = true;
 
   const stepInfo = runState.currentStep;
-  const preset = stepInfo.preset;
+  // 평문 PII를 runState에 보관하지 않고 사용 시점에 재조회 (F9)
+  const preset = await getPresetById(stepInfo.presetId);
+  if (!preset) {
+    await failRun('스텝 "' + stepInfo.presetName + '"의 프리셋을 찾을 수 없습니다.');
+    return;
+  }
 
   let applyResult = { applied: [], failures: [] };
   try {
@@ -312,36 +751,44 @@ async function handleStepTabLoaded(tabId) {
 }
 
 async function startGroupRun(groupId) {
-  if (runState && (runState.status === 'running' || runState.status === 'waiting')) {
+  if (groupRunInFlight || (runState && (runState.status === 'running' || runState.status === 'waiting'))) {
     throw new Error('이미 실행 중인 그룹이 있습니다. 먼저 중지해주세요.');
   }
-  const groups = await getGroups();
-  const group = groups.find((g) => g.id === groupId);
-  if (!group) throw new Error('그룹을 찾을 수 없습니다.');
-  if (!group.steps || group.steps.length === 0) {
-    throw new Error('그룹에 실행할 스텝이 없습니다.');
-  }
+  // 첫 await 전에 동기 선점해 이중 진입 차단 (Flow-1)
+  groupRunInFlight = true;
+  try {
+    const groups = await getGroups();
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) throw new Error('그룹을 찾을 수 없습니다.');
+    if (!group.steps || group.steps.length === 0) {
+      throw new Error('그룹에 실행할 스텝이 없습니다.');
+    }
 
-  runState = {
-    runId: crypto.randomUUID(),
-    groupId: group.id,
-    group: JSON.parse(JSON.stringify(group)),
-    stepIdx: 0,
-    status: 'running',
-    stepResults: [],
-    currentTabId: null,
-    currentStep: null,
-    error: null
-  };
-  await startCurrentStep();
-  await persistRunState();
-  return sanitizeRunState();
+    runState = {
+      runId: crypto.randomUUID(),
+      groupId: group.id,
+      group: JSON.parse(JSON.stringify(group)),
+      stepIdx: 0,
+      status: 'running',
+      stepResults: [],
+      currentTabId: null,
+      currentStep: null,
+      error: null
+    };
+    await startCurrentStep();
+    await persistRunState();
+    return sanitizeRunState();
+  } finally {
+    groupRunInFlight = false;
+  }
 }
 
 async function nextStep() {
   if (!runState || runState.status !== 'waiting') {
     throw new Error('대기 중인 스텝이 없습니다.');
   }
+  // 동기 전이: 두 번째 호출의 status==='waiting' 검사가 실패하게 해 스텝 스킵 방지 (Flow-2)
+  runState.status = 'running';
   runState.stepIdx++;
   await startCurrentStep();
   await persistRunState();
@@ -351,6 +798,10 @@ async function nextStep() {
 async function handleMessage(msg, sender) {
   switch (msg.type) {
     case 'PRESET_LIST': {
+      const keyStatus = await getVaultKeyStatus();
+      if (keyStatus && keyStatus.ok === false) {
+        throw new Error(keyStatus.message);
+      }
       return getAllPresets();
     }
     case 'PRESET_CREATE': {
@@ -359,6 +810,7 @@ async function handleMessage(msg, sender) {
         id: crypto.randomUUID(),
         name: msg.name || '새 프리셋',
         urlPattern: msg.urlPattern || '',
+        urlPatterns: normalizePatternList(msg.urlPatterns && msg.urlPatterns.length ? msg.urlPatterns : [msg.urlPattern || '']),
         fields: [],
         autoApply: !!msg.autoApply,
         createdAt: now,
@@ -380,16 +832,12 @@ async function handleMessage(msg, sender) {
       return updated;
     }
     case 'PRESET_DELETE': {
-      await deletePreset(msg.id);
-      const groups = await getGroups();
-      let changed = false;
-      for (const g of groups) {
-        const before = g.steps.length;
-        g.steps = g.steps.filter((s) => s.presetId !== msg.id);
-        if (g.steps.length !== before) changed = true;
-      }
-      if (changed) await saveGroups(groups);
+      if (typeof msg.id !== 'string' || !msg.id) throw new Error('삭제할 프리셋을 선택해주세요.');
+      await deletePresets([msg.id]);
       return true;
+    }
+    case 'PRESET_DELETE_MANY': {
+      return deletePresets(msg.ids);
     }
     case 'GROUP_LIST': {
       return getGroups();
@@ -471,22 +919,89 @@ async function handleMessage(msg, sender) {
       return preset;
     }
     case 'RECORD_START': {
-      recordTabs.add(msg.tabId);
+      const tabId = msg.tabId;
+      let tab;
       try {
-        await chrome.tabs.sendMessage(msg.tabId, { type: 'RECORD_START', presetId: msg.presetId });
+        tab = await chrome.tabs.get(tabId);
       } catch (e) {
+        throw new Error('탭 정보를 확인할 수 없습니다.');
+      }
+      const existing = getRecordSession(tabId);
+      if (existing && existing.presetId === msg.presetId) {
+        rememberSessionSite(existing, tab.url);
+        await persistRecordSessions();
+        try {
+          await chrome.tabs.sendMessage(tabId, {
+            type: 'RECORD_START',
+            presetId: msg.presetId,
+            resume: true,
+            eventCount: existing.events.length
+          });
+        } catch (e) {
+          throw new Error('페이지에서 녹화를 시작할 수 없습니다. 지원되지 않는 페이지(예: chrome://)입니다.');
+        }
+        return true;
+      }
+      setRecordSession(tabId, {
+        presetId: msg.presetId,
+        events: [],
+        lastRecordAt: 0,
+        startUrl: tab.url || '',
+        lastUrl: tab.url || '',
+        allowedSites: []
+      });
+      rememberSessionSite(getRecordSession(tabId), tab.url);
+      await persistRecordSessions();
+      try {
+        await chrome.tabs.sendMessage(tabId, {
+          type: 'RECORD_START',
+          presetId: msg.presetId,
+          resume: false,
+          eventCount: 0
+        });
+      } catch (e) {
+        deleteRecordSession(tabId);
+        await persistRecordSessions();
         throw new Error('페이지에서 녹화를 시작할 수 없습니다. 지원되지 않는 페이지(예: chrome://)입니다.');
       }
       return true;
     }
+    case 'RECORD_APPEND': {
+      const tabId = msg.tabId || (sender.tab && sender.tab.id);
+      const session = getRecordSession(tabId);
+      if (!session) throw new Error('녹화 중이 아닙니다.');
+      if (!msg.event || typeof msg.event !== 'object') throw new Error('잘못된 녹화 이벤트입니다.');
+      const count = appendSessionEvent(session, msg.event);
+      await persistRecordSessions();
+      return { count };
+    }
     case 'RECORD_STOP': {
-      recordTabs.delete(msg.tabId);
+      const tabId = msg.tabId || (sender.tab && sender.tab.id);
       try {
-        await chrome.tabs.sendMessage(msg.tabId, { type: 'RECORD_STOP' });
+        await chrome.tabs.sendMessage(tabId, { type: 'RECORD_STOP' });
       } catch (e) {
-        // 페이지가 닫혔거나 스크립트가 없으면 무시
+        // 페이지가 닫혔거나 스크립트가 없으면 세션에 남은 이벤트로 저장
       }
-      return true;
+      const session = getRecordSession(tabId);
+      deleteRecordSession(tabId);
+      await persistRecordSessions();
+      if (!session || !Array.isArray(session.events) || session.events.length === 0) {
+        return { saved: 0 };
+      }
+      const preset = await getPresetById(session.presetId);
+      if (!preset) throw new Error('프리셋을 찾을 수 없습니다.');
+      preset.fields = session.events.map((e) => normalizeRecordEvent(e));
+      preset.updatedAt = Date.now();
+      if (session.startUrl) preset.startUrl = session.startUrl;
+      const visited = Array.isArray(session.allowedSites) ? session.allowedSites : [];
+      const fromEvents = (session.events || [])
+        .filter((e) => e && e.type === 'navigate')
+        .map((e) => urlToSitePattern(e.value));
+      const merged = mergeUrlPatterns(getPresetPatterns(preset), [urlToSitePattern(session.startUrl)].concat(visited, fromEvents));
+      preset.urlPatterns = merged;
+      preset.urlPattern = merged[0] || preset.urlPattern;
+      await savePreset(preset);
+      return { saved: preset.fields.length, preset };
     }
     case 'RECORD_SAVE': {
       const preset = await getPresetById(msg.presetId);
@@ -516,7 +1031,15 @@ async function handleMessage(msg, sender) {
       if (!preset) throw new Error('프리셋을 찾을 수 없습니다.');
       const tab = await chrome.tabs.get(msg.tabId);
       if (!tab.url) throw new Error('탭 정보를 확인할 수 없습니다.');
-      if (!matchUrlPattern(preset.urlPattern, tab.url)) {
+      if (isJourneyPreset(preset)) {
+        const startOk = preset.startUrl && matchPresetUrl(preset, preset.startUrl);
+        const tabOk = matchPresetUrl(preset, tab.url);
+        if (!startOk && !tabOk) {
+          throw new Error('현재 페이지가 프리셋 대상 사이트가 아닙니다.');
+        }
+        return replayJourney(msg.tabId, preset);
+      }
+      if (!matchPresetUrl(preset, tab.url)) {
         throw new Error('현재 페이지가 프리셋 대상 사이트가 아닙니다.');
       }
       const resp = await chrome.tabs.sendMessage(msg.tabId, { type: 'APPLY_PRESET', preset });
@@ -524,11 +1047,11 @@ async function handleMessage(msg, sender) {
     }
     case 'AUTO_APPLY_CHECK': {
       const index = await getPresetIndex();
-      const matching = index.filter((p) => p.autoApply && matchUrlPattern(p.urlPattern, msg.url));
+      const matching = index.filter((p) => p.autoApply && matchPresetUrl(p, msg.url));
       const result = [];
       for (const entry of matching) {
         const preset = await getPresetById(entry.id);
-        if (preset) result.push(preset);
+        if (preset && !isJourneyPreset(preset)) result.push(preset);
       }
       return result;
     }
@@ -543,6 +1066,11 @@ async function handleMessage(msg, sender) {
       };
     }
     case 'IMPORT_DATA': {
+      // background 단 총 메시지 크기 제한 (I9)
+      const rawSize = JSON.stringify(msg.data || {}).length;
+      if (rawSize > MAX_IMPORT_BYTES) {
+        throw new Error('가져오기 데이터가 너무 큽니다. (최대 ' + (MAX_IMPORT_BYTES / 1024 / 1024) + 'MB)');
+      }
       const imported = validateImportData(msg.data);
       const existingGroups = await getGroups();
 
@@ -554,6 +1082,7 @@ async function handleMessage(msg, sender) {
         if (oldId) idMap.set(oldId, preset.id);
         preset.createdAt = preset.createdAt || now;
         preset.updatedAt = now;
+        normalizePresetPatterns(preset);
         // 프리셋 전체를 통째로 암호화 저장 (민감 여부 무관)
         await setSecret('preset:' + preset.id, JSON.stringify(preset));
       }
@@ -576,6 +1105,7 @@ async function handleMessage(msg, sender) {
           id: preset.id,
           name: preset.name,
           urlPattern: preset.urlPattern,
+          urlPatterns: getPresetPatterns(preset),
           autoApply: !!preset.autoApply,
           updatedAt: preset.updatedAt
         });
@@ -590,6 +1120,11 @@ async function handleMessage(msg, sender) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // 자체 확장(popup/content script)의 메시지만 처리 — 타 확장의 PII 유출/주입 차단 (F1)
+  if (!sender || sender.id !== chrome.runtime.id) {
+    sendResponse({ ok: false, error: '허용되지 않은 발신자입니다.' });
+    return;
+  }
   handleMessage(msg, sender)
     .then((data) => sendResponse({ ok: true, data }))
     .catch((err) => sendResponse({ ok: false, error: err && err.message ? err.message : String(err) }));
@@ -597,13 +1132,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function applyAutoPreset(tabId, url) {
+  if (getRecordSession(tabId) || journeyReplayTabId === tabId) return;
   try {
     const index = await getPresetIndex();
-    const matching = index.filter((p) => p.autoApply && matchUrlPattern(p.urlPattern, url));
+    const matching = index.filter((p) => p.autoApply && matchPresetUrl(p, url));
     for (const entry of matching) {
       try {
         const preset = await getPresetById(entry.id);
-        if (!preset) continue;
+        if (!preset || isJourneyPreset(preset)) continue;
         await chrome.tabs.sendMessage(tabId, { type: 'APPLY_PRESET', preset });
       } catch (e) {
         // 페이지가 아직 스크립트를 로드하지 않았으면 무시
@@ -615,7 +1151,12 @@ async function applyAutoPreset(tabId, url) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    appendNavigateIfRecording(tabId, changeInfo.url);
+  }
   if (changeInfo.status !== 'complete' || !tab.url) return;
+  notifyTabComplete(tabId);
+  resumeRecordingIfNeeded(tabId);
   applyAutoPreset(tabId, tab.url);
   if (runState && runState.status === 'running' && runState.currentTabId === tabId) {
     handleStepTabLoaded(tabId);
@@ -623,7 +1164,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (runState && runState.status === 'running' && runState.currentTabId === tabId) {
+  // 닫힌 탭을 캡처/녹화 추적에서 제거 (좀비 방지, Flow-9)
+  captureTabs.delete(tabId);
+  deleteRecordSession(tabId);
+  persistRecordSessions();
+  // 실행 중(running)뿐 아니라 대기(waiting) 중에도 탭이 닫히면 run 실패 처리 (Flow-12)
+  if (runState && runState.currentTabId === tabId && (runState.status === 'running' || runState.status === 'waiting')) {
     failRun('실행 중인 탭이 닫혀 그룹 실행이 중단되었습니다.');
   }
 });
@@ -633,6 +1179,8 @@ async function resumeRunAfterRestore() {
   try {
     const tab = await chrome.tabs.get(runState.currentTabId);
     if (tab.status === 'complete') {
+      // 복원 시 이전 세션의 중복 처리 가드를 해제해 재개 가능하게 함 (Flow-13/F9)
+      if (runState.currentStep) runState.currentStep.applied = false;
       await handleStepTabLoaded(tab.id);
     }
   } catch (e) {
@@ -642,53 +1190,110 @@ async function resumeRunAfterRestore() {
 
 // 레거시(필드 단위 민감 암호화) 저장 데이터를 프리셋별 전체 암호화로 1회 이전
 async function migrateLegacyStorage() {
-  const data = await chrome.storage.local.get(STORAGE_KEY);
-  const presets = Array.isArray(data[STORAGE_KEY]) ? data[STORAGE_KEY] : [];
-  if (presets.length === 0) return;
-  // 이미 인덱스 형식(첫 항목에 fields 없음)이면 스킵
-  if (!presets[0] || !Array.isArray(presets[0].fields)) return;
+  try {
+    const data = await chrome.storage.local.get(STORAGE_KEY);
+    const presets = Array.isArray(data[STORAGE_KEY]) ? data[STORAGE_KEY] : [];
+    if (presets.length === 0) return;
+    // 이미 인덱스 형식(첫 항목에 fields 없음)이면 스킵
+    if (!presets[0] || !Array.isArray(presets[0].fields)) return;
 
-  const index = [];
-  for (const p of presets) {
-    if (!p || typeof p.id !== 'string') continue;
-    const fields = [];
-    for (const f of (Array.isArray(p.fields) ? p.fields : [])) {
-      if (f.sensitive) {
-        // 레거시 필드별 암호문(sec:<presetId>:<fieldId>) 복호화 후 정리
-        const secret = await getSecret(p.id + ':' + f.id);
-        fields.push({ ...f, value: secret ?? '' });
-        await deleteSecret(p.id + ':' + f.id);
-      } else {
-        fields.push({ ...f });
+    const index = [];
+    const legacySecretsToDelete = [];
+    for (const p of presets) {
+      if (!p || typeof p.id !== 'string') continue;
+      const fields = [];
+      for (const f of (Array.isArray(p.fields) ? p.fields : [])) {
+        if (f.sensitive) {
+          // 레거시 필드별 암호문(sec:<presetId>:<fieldId>) 복호화
+          const secret = await getSecret(p.id + ':' + f.id);
+          fields.push({ ...f, value: secret ?? '' });
+          legacySecretsToDelete.push(p.id + ':' + f.id);
+        } else {
+          fields.push({ ...f });
+        }
+      }
+      const full = { ...p, fields };
+      normalizePresetPatterns(full);
+      await setSecret('preset:' + full.id, JSON.stringify(full));
+      index.push({
+        id: full.id,
+        name: full.name,
+        urlPattern: full.urlPattern,
+        urlPatterns: getPresetPatterns(full),
+        autoApply: !!full.autoApply,
+        updatedAt: full.updatedAt
+      });
+    }
+    await savePresetIndex(index);
+
+    // 마이그레이션 성공 후에만 레거시 필드별 암호문 정리 (실패 시 레거시 원본 보존, L3)
+    if (legacySecretsToDelete.length) {
+      await chrome.storage.local.remove(legacySecretsToDelete);
+    }
+
+    // 남은 레거시 필드별 암호문(sec:preset: 제외, 두 세그먼트 키) 정리
+    const all = await chrome.storage.local.get(null);
+    const legacyKeys = Object.keys(all).filter((k) => /^sec:(?!preset:)[^:]+:[^:]+$/.test(k));
+    if (legacyKeys.length) await chrome.storage.local.remove(legacyKeys);
+  } catch (e) {
+    // 실패 시 unhandledRejection 없이 로깅 후 마이그레이션 중단 (레거시 원본 보존, L3)
+    console.error('레거시 데이터 마이그레이션 실패:', e);
+  }
+}
+
+// 키 무결성이 확인된 경우에만 인덱스에만 있고 blob이 없는 항목 정리 (X1)
+async function cleanupOrphanIndexEntries() {
+  try {
+    const keyStatus = await getVaultKeyStatus();
+    if (!keyStatus || keyStatus.ok !== true) return; // 키 손상/누락 의심 시 인덱스 보존
+    const index = await getPresetIndex();
+    if (index.length === 0) return;
+    const data = await chrome.storage.local.get(index.map((e) => 'sec:preset:' + e.id));
+    const cleaned = index.filter((e) => data['sec:preset:' + e.id] !== undefined);
+    if (cleaned.length !== index.length) {
+      await savePresetIndex(cleaned);
+    }
+  } catch (e) {
+    console.error('고아 인덱스 정리 실패:', e);
+  }
+}
+
+// vault 키 손상/누락 감지 — 사용자 경고 (K1/K2/F6)
+async function checkVaultKey() {
+  try {
+    const status = await getVaultKeyStatus();
+    if (status && status.ok === false) {
+      console.error('[secure-store] ' + status.message);
+      try {
+        chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: '암호화 키 오류',
+          message: status.message
+        });
+      } catch (e) {
+        // 알림 권한 미설정 등이면 로그만 남김
       }
     }
-    const full = { ...p, fields };
-    await setSecret('preset:' + full.id, JSON.stringify(full));
-    index.push({
-      id: full.id,
-      name: full.name,
-      urlPattern: full.urlPattern,
-      autoApply: !!full.autoApply,
-      updatedAt: full.updatedAt
-    });
+  } catch (e) {
+    console.error('[secure-store] 키 상태 확인 실패:', e);
   }
-  await savePresetIndex(index);
-
-  // 남은 레거시 필드별 암호문(sec:preset: 제외, 두 세그먼트 키) 정리
-  const all = await chrome.storage.local.get(null);
-  const legacyKeys = Object.keys(all).filter((k) => /^sec:(?!preset:)[^:]+:[^:]+$/.test(k));
-  if (legacyKeys.length) await chrome.storage.local.remove(legacyKeys);
 }
 
 migrateLegacyStorage()
+  .catch((e) => console.error('레거시 데이터 마이그레이션 실패:', e))
   .then(restoreRunState)
-  .then(resumeRunAfterRestore);
+  .then(restoreRecordSessions)
+  .then(resumeAllRecordChips)
+  .then(resumeRunAfterRestore)
+  .then(cleanupOrphanIndexEntries);
+checkVaultKey();
 
 function validateImportData(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error('지원되지 않는 파일 형식입니다.');
   }
-  if (typeof data.schemaVersion !== 'number' || data.schemaVersion < 1) {
+  if (!Number.isInteger(data.schemaVersion) || data.schemaVersion < 1) {
     throw new Error('지원되지 않는 파일 형식입니다.');
   }
   if (data.schemaVersion > EXPORT_SCHEMA_VERSION) {
@@ -701,12 +1306,25 @@ function validateImportData(data) {
   const presets = [];
   for (const p of rawPresets.slice(0, MAX_IMPORT_PRESETS)) {
     if (!p || typeof p !== 'object') continue;
-    if (typeof p.name !== 'string' || typeof p.urlPattern !== 'string') continue;
+    if (typeof p.name !== 'string') continue;
+    const hasPattern =
+      typeof p.urlPattern === 'string' ||
+      (Array.isArray(p.urlPatterns) && p.urlPatterns.some((x) => typeof x === 'string' && x.trim()));
+    if (!hasPattern) continue;
+    normalizePresetPatterns(p);
     if (!Array.isArray(p.fields)) continue;
+    // 프리셋당 필드 수 상한 — 초과 시 해당 프리셋만 드롭 (명시적 처리, F7)
+    if (p.fields.length > MAX_FIELDS_PER_PRESET) {
+      console.warn('프리셋 "' + p.name + '"의 필드 수가 상한(' + MAX_FIELDS_PER_PRESET + '개)을 초과해 가져오기에서 제외합니다.');
+      continue;
+    }
     const fieldsValid = p.fields.every(
-      (f) => f && typeof f === 'object' && typeof f.label === 'string' && typeof f.selector === 'string' && typeof f.value === 'string'
+      (f) => f && typeof f === 'object' && typeof f.label === 'string' && typeof f.selector === 'string' && typeof f.value === 'string' && f.value.length <= MAX_FIELD_VALUE_LENGTH
     );
-    if (!fieldsValid) continue;
+    if (!fieldsValid) {
+      console.warn('프리셋 "' + p.name + '"에 크기 상한(' + MAX_FIELD_VALUE_LENGTH + '자)을 초과하는 필드 값이 있어 가져오기에서 제외합니다.');
+      continue;
+    }
     presets.push({ ...p });
   }
 

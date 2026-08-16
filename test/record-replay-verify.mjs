@@ -123,12 +123,25 @@ class MockElement {
   }
 
   closest(sel) {
+    const parts = String(sel)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
     let node = this;
     while (node) {
-      if (matchesSelector(node, sel)) return node;
+      if (parts.some((p) => matchesSelector(node, p))) return node;
       node = node.parentElement;
     }
     return null;
+  }
+
+  click() {
+    const ev = { type: 'click', target: this, bubbles: true };
+    const fns = this.eventListeners.click || [];
+    fns.forEach((fn) => fn.call(this, ev));
+    if (typeof document.dispatchSyntheticEvent === 'function') {
+      document.dispatchSyntheticEvent('click', this);
+    }
   }
 
   querySelector(sel) {
@@ -221,6 +234,15 @@ Object.defineProperty(MockElement.prototype, 'innerHTML', {
     setInnerHTML(this, v);
   }
 });
+Object.defineProperty(MockElement.prototype, 'innerText', {
+  configurable: true,
+  get() {
+    return this.textContent;
+  },
+  set(v) {
+    this.textContent = v;
+  }
+});
 
 function matchesSimple(el, simple) {
   let nth = null;
@@ -239,6 +261,11 @@ function matchesSimple(el, simple) {
   if (simple.startsWith('.')) return el.classList.contains(simple.slice(1));
   const attrMatch = simple.match(/^\[([\w-]+)="([^"]*)"\]$/);
   if (attrMatch) return el.getAttribute(attrMatch[1]) === attrMatch[2];
+  const tagAttr = simple.match(/^([a-zA-Z][\w-]*)(\[[^\]]+\])$/);
+  if (tagAttr) {
+    if (el.tagName.toLowerCase() !== tagAttr[1].toLowerCase()) return false;
+    return matchesSimple(el, tagAttr[2]);
+  }
   return el.tagName.toLowerCase() === simple.toLowerCase();
 }
 
@@ -285,6 +312,17 @@ globalThis.Event = class Event {
   constructor(type, opts) {
     this.type = type;
     this.bubbles = !!(opts && opts.bubbles);
+    this.cancelable = !!(opts && opts.cancelable);
+  }
+};
+globalThis.KeyboardEvent = class KeyboardEvent extends Event {
+  constructor(type, opts = {}) {
+    super(type, opts);
+    this.key = opts.key || '';
+    this.code = opts.code || '';
+    this.keyCode = opts.keyCode || 0;
+    this.which = opts.which || 0;
+    this.isComposing = !!opts.isComposing;
   }
 };
 globalThis.MutationObserver = class {
@@ -330,8 +368,8 @@ globalThis.document = {
     if (idx !== -1) list.splice(idx, 1);
   },
   // 테스트 전용: document 레벨 캡처 리스너로 합성 이벤트 전달
-  dispatchSyntheticEvent(type, target) {
-    const ev = { type, target, isComposing: false, keyCode: 0 };
+  dispatchSyntheticEvent(type, target, extra) {
+    const ev = Object.assign({ type, target, isComposing: false, keyCode: 0, key: '' }, extra || {});
     (docListeners[type] || []).forEach((fn) => fn.call(document, ev));
   }
 };
@@ -395,6 +433,9 @@ function callBackground(msg) {
   });
 }
 
+let mockTabUrl = 'https://example.com/form';
+const tabUpdatedListeners = [];
+
 globalThis.chrome = {
   runtime: {
     onMessage: {
@@ -415,19 +456,38 @@ globalThis.chrome = {
   },
   tabs: {
     async get(tabId) {
-      return { id: tabId, url: 'https://example.com/form' };
+      return { id: tabId, url: mockTabUrl, status: 'complete' };
     },
     async sendMessage(tabId, msg) {
       return callContent(msg);
+    },
+    async update(tabId, opts) {
+      if (opts && opts.url) {
+        mockTabUrl = opts.url;
+        globalThis.location.href = opts.url;
+        tabUpdatedListeners.forEach((fn) => fn(tabId, { url: opts.url }, { id: tabId, url: opts.url }));
+        tabUpdatedListeners.forEach((fn) =>
+          fn(tabId, { status: 'complete' }, { id: tabId, url: mockTabUrl, status: 'complete' })
+        );
+      }
+      return { id: tabId, url: mockTabUrl, status: 'complete' };
     },
     async create(opts) {
       return { id: 999, url: opts.url };
     },
     async remove() {},
     async query() {
-      return [{ id: 1, url: 'https://example.com/form' }];
+      return [{ id: 1, url: mockTabUrl }];
     },
-    onUpdated: { addListener() {} },
+    onUpdated: {
+      addListener(fn) {
+        tabUpdatedListeners.push(fn);
+      },
+      removeListener(fn) {
+        const idx = tabUpdatedListeners.indexOf(fn);
+        if (idx !== -1) tabUpdatedListeners.splice(idx, 1);
+      }
+    },
     onRemoved: { addListener() {} }
   },
   action: {
@@ -492,10 +552,21 @@ agreeCheck.setAttribute('name', 'agree');
 agreeCheck.setAttribute('aria-label', '약관 동의');
 agreeCheck.type = 'checkbox';
 
+const searchBtn = document.createElement('button');
+searchBtn.setAttribute('id', 'search-btn');
+searchBtn.setAttribute('type', 'button');
+searchBtn.textContent = '검색';
+const moreLink = document.createElement('a');
+moreLink.setAttribute('id', 'price-more');
+moreLink.setAttribute('href', '#price');
+moreLink.textContent = '가격비교 더보기';
+
 form.appendChild(nameInput);
 form.appendChild(emailInput);
 form.appendChild(deptSelect);
 form.appendChild(agreeCheck);
+form.appendChild(searchBtn);
+form.appendChild(moreLink);
 document.body.appendChild(form);
 
 // ============================================================
@@ -586,6 +657,9 @@ check('이름 값 (연속 수정 머지)', byName['#user-name'].value, '홍길�
 check('이메일 값 (복호화)', byName['#user-email'].value, 'hong@test.com');
 check('부서 값', byName['#dept'].value, 'sales');
 check('약관 값', byName['#agree'].value, 'true');
+check('단일 사이트 urlPatterns 1개', Array.isArray(resolved.urlPatterns) && resolved.urlPatterns.length, 1);
+check('단일 사이트 urlPattern=호스트', resolved.urlPattern, 'example.com');
+check('인덱스 urlPatterns 포함', Array.isArray(indexEntry.urlPatterns) && indexEntry.urlPatterns[0], 'example.com');
 check('첫 이벤트 delay 0', fields[0].delay, 0);
 check('이메일 delay 존재(숫자)', typeof byName['#user-email'].delay === 'number' && byName['#user-email'].delay > 0, true);
 check('이메일 자동 민감 감지 (마스킹 신호)', !!byName['#user-email'].sensitive, true);
@@ -607,8 +681,222 @@ check('재생 후 약관 체크', agreeCheck._checked, true);
 // 5-13. 순차 재생 확인 (delay 있는 필드가 순서대로 — 첫 필드 이후 delay > 0 인지)
 check('재생에 delay 사용됨 (순차 경로)', result.applied.length > 0 && fields.some((f) => f.delay > 0), true);
 
+const renamed = {
+  ...resolved,
+  fields: resolved.fields.map((f, i) => (i === 0 ? { ...f, label: '신청자 이름' } : f))
+};
+const renameResp = await callBackground({ type: 'PRESET_UPDATE', preset: renamed });
+check('필드명 PRESET_UPDATE ok', !!renameResp.ok, true);
+const listRenamed = await callBackground({ type: 'PRESET_LIST' });
+const afterRename = (listRenamed.data || []).find((p) => p.id === presetId);
+check('필드명 수정 반영', afterRename && afterRename.fields[0] && afterRename.fields[0].label, '신청자 이름');
+resolved.fields[0].label = '신청자 이름';
+
 // ============================================================
-// 6. 결과
+// 6. 여정 녹화: 클릭 / Enter / 페이지 이동 후 재개
+// ============================================================
+console.log('\n[여정 녹화]');
+const created2 = await callBackground({ type: 'PRESET_CREATE', name: '여정', urlPattern: 'example.com' });
+assert.ok(created2.ok, '여정 PRESET_CREATE 실패');
+const journeyId = created2.data.id;
+const recStart2 = await callBackground({ type: 'RECORD_START', presetId: journeyId, tabId: 1 });
+check('여정 RECORD_START ok', !!recStart2.ok, true);
+
+nameInput._value = '수저세트';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+document.dispatchSyntheticEvent('keydown', nameInput, { key: 'Enter', keyCode: 13 });
+searchBtn.click();
+moreLink.click();
+await sleep(50);
+
+mockTabUrl = 'https://example.com/price';
+globalThis.location.href = mockTabUrl;
+tabUpdatedListeners.forEach((fn) => fn(1, { url: mockTabUrl }, { id: 1, url: mockTabUrl }));
+tabUpdatedListeners.forEach((fn) => fn(1, { status: 'complete' }, { id: 1, url: mockTabUrl, status: 'complete' }));
+await sleep(30);
+
+emailInput._value = '인기 수저세트';
+document.dispatchSyntheticEvent('input', emailInput);
+await sleep(450);
+
+const recStop2 = await callBackground({ type: 'RECORD_STOP', presetId: journeyId, tabId: 1 });
+check('여정 RECORD_STOP ok', !!recStop2.ok, true);
+check('여정 저장 개수 > 4', (recStop2.data && recStop2.data.saved) > 4, true);
+
+const list2 = await callBackground({ type: 'PRESET_LIST' });
+const journey = list2.data.find((p) => p.id === journeyId);
+assert.ok(journey, '여정 프리셋 없음');
+const types = journey.fields.map((f) => f.type);
+check('여정에 text 포함', types.includes('text'), true);
+check('여정에 keydown 포함', types.includes('keydown'), true);
+check('여정에 click 포함', types.includes('click'), true);
+check('여정에 navigate 포함', types.includes('navigate'), true);
+check('여정 startUrl 저장', typeof journey.startUrl === 'string' && journey.startUrl.length > 0, true);
+check('같은 호스트 이동은 사이트 1개', Array.isArray(journey.urlPatterns) && journey.urlPatterns.length, 1);
+check('여정 허용 사이트 example.com', journey.urlPatterns[0], 'example.com');
+const clickField = journey.fields.find((f) => f.type === 'click' && f.value.includes('가격비교'));
+check('가격비교 더보기 클릭 기록', !!(clickField && clickField.label), true);
+const navField = journey.fields.find((f) => f.type === 'navigate');
+check('navigate URL 기록', !!(navField && String(navField.value).includes('/price')), true);
+
+console.log('\n[여정 재생]');
+mockTabUrl = 'https://example.com/other';
+globalThis.location.href = mockTabUrl;
+nameInput._value = '';
+emailInput._value = '';
+let searchClicked = 0;
+let moreClicked = 0;
+searchBtn.addEventListener('click', () => {
+  searchClicked += 1;
+});
+moreLink.addEventListener('click', () => {
+  moreClicked += 1;
+});
+const replay2 = await callBackground({ type: 'APPLY_PRESET', presetId: journeyId, tabId: 1 });
+assert.ok(replay2.ok, '여정 APPLY_PRESET 실패: ' + (replay2.error || ''));
+const jr = replay2.data || {};
+check('여정 재생 실패 0건', (jr.failures || []).length, 0);
+check('여정 재생 성공 > 0', (jr.applied || []).length > 0, true);
+check('검색 버튼 클릭 재생', searchClicked > 0, true);
+check('가격비교 더보기 클릭 재생', moreClicked > 0, true);
+check('여정 재생 후 검색어', nameInput._value, '수저세트');
+
+// 자동 적용은 여정 프리셋을 건너뛴다
+const autoSet = { ...journey, autoApply: true };
+const autoUp = await callBackground({ type: 'PRESET_UPDATE', preset: autoSet });
+check('여정 autoApply 저장', !!autoUp.ok, true);
+const autoCheck = await callBackground({ type: 'AUTO_APPLY_CHECK', url: 'https://example.com/form' });
+const autoIds = (autoCheck.data || []).map((p) => p.id);
+check('여정은 자동 적용 목록에서 제외', autoIds.includes(journeyId), false);
+
+// ============================================================
+// 6.5 녹화 중 다른 사이트 이동 → 허용 사이트 N개
+// ============================================================
+console.log('\n[다중 사이트 허용]');
+const created3 = await callBackground({ type: 'PRESET_CREATE', name: '멀티사이트', urlPattern: 'example.com' });
+assert.ok(created3.ok, '멀티사이트 PRESET_CREATE 실패');
+const multiId = created3.data.id;
+mockTabUrl = 'https://example.com/form';
+globalThis.location.href = mockTabUrl;
+const recStart3 = await callBackground({ type: 'RECORD_START', presetId: multiId, tabId: 1 });
+check('멀티 RECORD_START ok', !!recStart3.ok, true);
+
+nameInput._value = '이동테스트';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+
+mockTabUrl = 'https://shop.other.com/cart';
+globalThis.location.href = mockTabUrl;
+tabUpdatedListeners.forEach((fn) => fn(1, { url: mockTabUrl }, { id: 1, url: mockTabUrl }));
+tabUpdatedListeners.forEach((fn) => fn(1, { status: 'complete' }, { id: 1, url: mockTabUrl, status: 'complete' }));
+await sleep(30);
+
+const recStop3 = await callBackground({ type: 'RECORD_STOP', presetId: multiId, tabId: 1 });
+check('멀티 RECORD_STOP ok', !!recStop3.ok, true);
+
+const list3 = await callBackground({ type: 'PRESET_LIST' });
+const multi = list3.data.find((p) => p.id === multiId);
+assert.ok(multi, '멀티사이트 프리셋 없음');
+check('urlPatterns 길이 2', Array.isArray(multi.urlPatterns) && multi.urlPatterns.length, 2);
+check('첫 사이트 example.com', multi.urlPatterns[0], 'example.com');
+check('둘째 사이트 shop.other.com', multi.urlPatterns[1], 'shop.other.com');
+check('대표 urlPattern은 시작 사이트', multi.urlPattern, 'example.com');
+
+mockTabUrl = 'https://shop.other.com/cart';
+const replayOnB = await callBackground({ type: 'APPLY_PRESET', presetId: multiId, tabId: 1 });
+check('둘째 사이트에서 재생 허용', !!replayOnB.ok, true);
+
+const formBUp = await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: presetId,
+    name: resolved.name,
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com', 'form-b.test'],
+    fields: resolved.fields,
+    autoApply: true
+  }
+});
+check('폼 전용 다중 사이트 저장', !!formBUp.ok, true);
+mockTabUrl = 'https://form-b.test/page';
+const formBApply = await callBackground({ type: 'APPLY_PRESET', presetId, tabId: 1 });
+check('폼 전용 둘째 사이트에서 적용', !!formBApply.ok, true);
+const autoB = await callBackground({ type: 'AUTO_APPLY_CHECK', url: 'https://form-b.test/page' });
+const autoBIds = (autoB.data || []).map((p) => p.id);
+check('자동 적용이 둘째 사이트도 매칭', autoBIds.includes(presetId), true);
+mockTabUrl = 'https://blocked.example.net/';
+const replayBlocked = await callBackground({ type: 'APPLY_PRESET', presetId, tabId: 1 });
+check('미허용 사이트는 거절', !!replayBlocked.ok, false);
+
+const created4 = await callBackground({ type: 'PRESET_CREATE', name: '와일드카드', urlPattern: '*.example.com' });
+assert.ok(created4.ok, '와일드카드 PRESET_CREATE 실패');
+const wildId = created4.data.id;
+mockTabUrl = 'https://www.example.com/';
+const recStart4 = await callBackground({ type: 'RECORD_START', presetId: wildId, tabId: 1 });
+check('와일드카드 RECORD_START ok', !!recStart4.ok, true);
+nameInput._value = '와일드';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+mockTabUrl = 'https://shop.example.com/item';
+tabUpdatedListeners.forEach((fn) => fn(1, { url: mockTabUrl }, { id: 1, url: mockTabUrl }));
+tabUpdatedListeners.forEach((fn) => fn(1, { status: 'complete' }, { id: 1, url: mockTabUrl, status: 'complete' }));
+await sleep(30);
+const recStop4 = await callBackground({ type: 'RECORD_STOP', presetId: wildId, tabId: 1 });
+check('와일드카드 RECORD_STOP ok', !!recStop4.ok, true);
+const list4 = await callBackground({ type: 'PRESET_LIST' });
+const wild = list4.data.find((p) => p.id === wildId);
+check('와일드카드는 커버 호스트를 추가하지 않음', Array.isArray(wild.urlPatterns) && wild.urlPatterns.length, 1);
+check('와일드카드 패턴 유지', wild.urlPatterns[0], '*.example.com');
+
+const created5 = await callBackground({ type: 'PRESET_CREATE', name: '제한URL', urlPattern: 'example.com' });
+const restrictId = created5.data.id;
+mockTabUrl = 'https://example.com/form';
+await callBackground({ type: 'RECORD_START', presetId: restrictId, tabId: 1 });
+nameInput._value = '제한';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+mockTabUrl = 'chrome://extensions';
+tabUpdatedListeners.forEach((fn) => fn(1, { url: mockTabUrl }, { id: 1, url: mockTabUrl }));
+mockTabUrl = 'https://allowed-b.com/page';
+tabUpdatedListeners.forEach((fn) => fn(1, { url: mockTabUrl }, { id: 1, url: mockTabUrl }));
+tabUpdatedListeners.forEach((fn) => fn(1, { status: 'complete' }, { id: 1, url: mockTabUrl, status: 'complete' }));
+await sleep(30);
+await callBackground({ type: 'RECORD_STOP', presetId: restrictId, tabId: 1 });
+const list5 = await callBackground({ type: 'PRESET_LIST' });
+const restrict = list5.data.find((p) => p.id === restrictId);
+const restrictJoined = (restrict.urlPatterns || []).join(',');
+check('chrome URL은 허용 목록 제외', restrictJoined.includes('chrome'), false);
+check('허용 사이트에 allowed-b.com 포함', restrictJoined.includes('allowed-b.com'), true);
+
+const legacyPreset = await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: { ...resolved, urlPatterns: [], urlPattern: 'example.com' }
+});
+check('레거시 urlPatterns 빈 배열 저장', !!legacyPreset.ok, true);
+mockTabUrl = 'https://example.com/form';
+const legacyApply = await callBackground({ type: 'APPLY_PRESET', presetId, tabId: 1 });
+check('레거시 urlPattern만으로 매칭', !!legacyApply.ok, true);
+
+console.log('\n[녹화 재시작 가드]');
+const created6 = await callBackground({ type: 'PRESET_CREATE', name: '이중시작', urlPattern: 'example.com' });
+const idempId = created6.data.id;
+mockTabUrl = 'https://example.com/form';
+globalThis.location.href = mockTabUrl;
+await callBackground({ type: 'RECORD_START', presetId: idempId, tabId: 1 });
+nameInput._value = '이중시작값';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+const recStartAgain = await callBackground({ type: 'RECORD_START', presetId: idempId, tabId: 1 });
+check('같은 프리셋 재 RECORD_START ok', !!recStartAgain.ok, true);
+await callBackground({ type: 'RECORD_STOP', presetId: idempId, tabId: 1 });
+const list6 = await callBackground({ type: 'PRESET_LIST' });
+const idemp = list6.data.find((p) => p.id === idempId);
+const idempName = (idemp.fields || []).find((f) => f && String(f.value) === '이중시작값');
+check('이중 RECORD_START 후에도 값 유지', !!idempName, true);
+
+// ============================================================
+// 7. 결과
 // ============================================================
 
 console.log('\n' + '='.repeat(50));

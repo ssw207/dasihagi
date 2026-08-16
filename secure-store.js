@@ -6,6 +6,7 @@
 
 const KEY_NAME = 'vault_key_v1';
 const SECRET_PREFIX = 'sec:';
+const PRESETS_INDEX_KEY = 'presets';
 const B64_CHUNK = 0x8000;
 
 function toB64(buf) {
@@ -24,16 +25,34 @@ function fromB64(str) {
   return bytes;
 }
 
+// 저장된 키 형식 검증 — 손상/오염된 키를 새 키 생성으로 덮어쓰지 않도록 사전 차단
+function isValidKeyFormat(stored) {
+  return (
+    typeof stored === 'string' &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(stored) &&
+    stored.length >= 24 &&
+    stored.length <= 64
+  );
+}
+
 let cachedKey = null;
 
 async function getOrCreateKey() {
   if (cachedKey) return cachedKey;
   const { [KEY_NAME]: stored } = await chrome.storage.local.get(KEY_NAME);
   if (stored) {
+    if (!isValidKeyFormat(stored)) {
+      throw new Error('암호화 키가 손상되었습니다.');
+    }
     cachedKey = await crypto.subtle.importKey(
       'raw', fromB64(stored), 'AES-GCM', false, ['encrypt', 'decrypt']
     );
     return cachedKey;
+  }
+  // 키가 없는데 저장된 프리셋이 있으면 새 키 자동 생성으로 기존 데이터를 소실시키지 않는다
+  const { [PRESETS_INDEX_KEY]: presets } = await chrome.storage.local.get(PRESETS_INDEX_KEY);
+  if (Array.isArray(presets) && presets.length > 0) {
+    throw new Error('암호화 키가 없어 저장된 프리셋을 복호화할 수 없습니다.');
   }
   const key = await crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']
@@ -42,6 +61,27 @@ async function getOrCreateKey() {
   await chrome.storage.local.set({ [KEY_NAME]: toB64(raw) });
   cachedKey = key;
   return cachedKey;
+}
+
+// vault 키 상태 신호 — background가 사용자 경고를 낼 수 있게 함 (K1/K2/F6)
+export async function getVaultKeyStatus() {
+  const { [KEY_NAME]: stored } = await chrome.storage.local.get(KEY_NAME);
+  const { [PRESETS_INDEX_KEY]: presets } = await chrome.storage.local.get(PRESETS_INDEX_KEY);
+  const hasPresets = Array.isArray(presets) && presets.length > 0;
+  if (!stored) {
+    return hasPresets
+      ? { ok: false, reason: 'missing', message: '암호화 키가 없어 저장된 프리셋을 복호화할 수 없습니다.' }
+      : { ok: true, empty: true };
+  }
+  if (!isValidKeyFormat(stored)) {
+    return { ok: false, reason: 'corrupt', message: '암호화 키가 손상되었습니다.' };
+  }
+  try {
+    await crypto.subtle.importKey('raw', fromB64(stored), 'AES-GCM', false, ['encrypt', 'decrypt']);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: 'corrupt', message: '암호화 키가 손상되었습니다.' };
+  }
 }
 
 export async function setSecret(id, plaintext) {

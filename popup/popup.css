@@ -44,8 +44,22 @@ body {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+.toolbar-select {
+  align-items: center;
+  justify-content: space-between;
+  margin-top: -4px;
+}
+
+.select-all-row {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
 }
 
 .btn {
@@ -121,6 +135,24 @@ body {
   margin-bottom: 6px;
 }
 
+.preset-select {
+  display: flex;
+  align-items: center;
+  flex: none;
+  cursor: pointer;
+}
+
+.preset-select input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.preset-card-head .preset-name {
+  flex: 1;
+  min-width: 0;
+}
+
 .preset-name {
   font-weight: 700;
   font-size: 13px;
@@ -146,6 +178,11 @@ body {
 .badge-auto {
   background: #d1fae5;
   color: #047857;
+}
+
+.badge-journey {
+  background: #ede9fe;
+  color: #6d28d9;
 }
 
 .preset-meta {
@@ -205,15 +242,24 @@ body {
   margin: 10px 0 4px;
 }
 
-.editor input[type="text"] {
+.editor input[type="text"],
+.editor textarea {
   width: 100%;
   padding: 7px 9px;
   border: 1px solid #d1d5db;
   border-radius: 6px;
   font-size: 13px;
+  font-family: inherit;
 }
 
-.editor input[type="text"]:focus {
+.editor textarea {
+  min-height: 64px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.editor input[type="text"]:focus,
+.editor textarea:focus {
   outline: 2px solid #3b82f6;
   outline-offset: -1px;
   border-color: #3b82f6;
@@ -270,6 +316,24 @@ body {
 .field-label {
   font-weight: 600;
   font-size: 12px;
+}
+
+.field-label-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #111827;
+  background: #fff;
+}
+
+.field-label-input:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: -1px;
+  border-color: #3b82f6;
 }
 
 .field-type {

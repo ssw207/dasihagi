@@ -1,12 +1,36 @@
 (() => {
   const capture = { active: false, presetId: null };
-  const record = { active: false, presetId: null, events: [], lastRecordAt: 0, debounceTimer: null, pending: null };
+  const record = {
+    active: false,
+    presetId: null,
+    events: [],
+    syncedCount: 0,
+    lastRecordAt: 0,
+    debounceTimer: null,
+    pending: null
+  };
   let styleEl = null;
   let panelEl = null;
   let panelTarget = null;
   let highlightObserver = null;
-  let applyAbort = null;
   let recordChipEl = null;
+
+  // 비보안 컨텍스트(http://)에서 crypto.randomUUID가 없을 때 사용할 폴백 UUID 생성기
+  function generateUuid() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+  }
 
   function injectStyles() {
     if (styleEl) return;
@@ -250,7 +274,7 @@
 
     function saveFromPanel() {
       const field = {
-        id: crypto.randomUUID(),
+        id: generateUuid(),
         label: labelInput.value.trim() || label,
         selector: generateSelector(el),
         value: isBoolean
@@ -364,13 +388,23 @@
       '<span id="fp-record-label">녹화 중 · 0개</span>' +
       '<button id="fp-record-stop">종료</button>';
     document.body.appendChild(recordChipEl);
-    recordChipEl.querySelector('#fp-record-stop').addEventListener('click', () => stopRecordingMode());
+    recordChipEl.querySelector('#fp-record-stop').addEventListener('click', () => {
+      chrome.runtime.sendMessage({ type: 'RECORD_STOP' }, (resp) => {
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          showRecordToast('저장 실패: ' + (resp && resp.error ? resp.error : '알 수 없는 오류'));
+          return;
+        }
+        const saved = resp.data && typeof resp.data.saved === 'number' ? resp.data.saved : 0;
+        showRecordToast(saved === 0 ? '기록된 행동이 없습니다.' : '저장 완료! ' + saved + '개 행동이 기록되었습니다.');
+      });
+    });
   }
 
   function updateRecordChip() {
     if (!recordChipEl) return;
     const label = recordChipEl.querySelector('#fp-record-label');
-    if (label) label.textContent = '녹화 중 · ' + record.events.length + '개';
+    const n = typeof record.syncedCount === 'number' ? record.syncedCount : record.events.length;
+    if (label) label.textContent = '녹화 중 · ' + n + '개';
   }
 
   function hideRecordChip() {
@@ -388,43 +422,117 @@
     setTimeout(() => toast.remove(), 2200);
   }
 
-  function recordEvent(el, type, value) {
-    const now = Date.now();
-    const delay = record.lastRecordAt ? Math.min(now - record.lastRecordAt, RECORD_MAX_DELAY) : 0;
-    record.lastRecordAt = now;
+  function isExtensionUi(el) {
+    return !!(el && el.closest && el.closest('.fp-record-chip, .fp-panel'));
+  }
+
+  function visibleText(el) {
+    if (!el) return '';
+    const raw = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
+    return raw.replace(/\s+/g, ' ').slice(0, 80);
+  }
+
+  function clickRecordTarget(el) {
+    if (!(el instanceof Element)) return null;
+    if (isExtensionUi(el)) return null;
+    const interactive = el.closest(
+      'a, button, [role="button"], [role="link"], input[type="submit"], input[type="button"], input[type="image"], input[type="reset"]'
+    );
+    if (interactive) {
+      if (isExtensionUi(interactive)) return null;
+      if (interactive instanceof HTMLInputElement && (interactive.type === 'checkbox' || interactive.type === 'radio')) {
+        return null;
+      }
+      return interactive;
+    }
+    if (isFormField(el)) return null;
+    return el;
+  }
+
+  function sendRecordAppend(field) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RECORD_APPEND', event: field }, (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+        if (resp && resp.ok && resp.data && typeof resp.data.count === 'number') {
+          record.syncedCount = resp.data.count;
+          updateRecordChip();
+        }
+        resolve(resp);
+      });
+    });
+  }
+
+  function recordAction(el, type, value, label) {
     const field = {
-      id: crypto.randomUUID(),
-      label: detectFieldLabel(el),
-      selector: generateSelector(el),
+      id: generateUuid(),
+      label: label || (el ? detectFieldLabel(el) : '필드'),
+      selector: el ? generateSelector(el) : '',
       value: String(value),
       type: type,
-      delay: delay
+      delay: 0
     };
-    // 개인정보 자동 감지 (메타데이터 + 값 정규식) → 민감 필드로 자동 암호화
-    if (window.PiiDetect && window.PiiDetect.isSensitive(el, field.value)) {
+    const formTypes = type === 'text' || type === 'textarea' || type === 'select' || type === 'checkbox' || type === 'radio';
+    if (el && formTypes && window.PiiDetect && window.PiiDetect.isSensitive(el, field.value)) {
       field.sensitive = true;
     }
     const last = record.events[record.events.length - 1];
-    // 같은 필드를 연속 수정하면 새 행동을 추가하지 않고 마지막 값만 갱신
-    if (last && last.selector === field.selector && last.type === field.type) {
+    const mergeable = type !== 'click' && type !== 'keydown' && type !== 'navigate';
+    if (mergeable && last && last.selector === field.selector && last.type === field.type) {
       last.value = field.value;
+      if (field.sensitive) last.sensitive = true;
     } else {
       record.events.push(field);
     }
     updateRecordChip();
+    return sendRecordAppend(field);
+  }
+
+  function recordEvent(el, type, value) {
+    return recordAction(el, type, value);
   }
 
   function flushPendingRecord() {
-    if (!record.active || !record.pending) return;
+    if (!record.active || !record.pending) return Promise.resolve();
     const pending = record.pending;
     record.pending = null;
-    recordEvent(pending.el, pending.type, pending.el.value);
+    return recordEvent(pending.el, pending.type, pending.el.value);
+  }
+
+  function onRecordClick(e) {
+    if (!record.active) return;
+    const raw = e.target instanceof Element ? e.target : null;
+    if (!raw) return;
+    const target = clickRecordTarget(raw);
+    if (!target) return;
+    flushPendingRecord();
+    const text = visibleText(target);
+    recordAction(target, 'click', text, text || detectFieldLabel(target));
+  }
+
+  function onRecordKeydown(e) {
+    if (!record.active) return;
+    if (e.key !== 'Enter' && e.keyCode !== 13) return;
+    if (e.isComposing || e.keyCode === 229) return;
+    const el = e.target;
+    if (!(el instanceof Element) || isExtensionUi(el)) return;
+    flushPendingRecord();
+    recordAction(el, 'keydown', 'Enter', detectFieldLabel(el) || 'Enter');
+  }
+
+  function onRecordPageHide() {
+    if (!record.active) return;
+    flushPendingRecord();
   }
 
   function onRecordInput(e) {
     if (!record.active) return;
     const el = e.target;
     if (!(el instanceof Element) || !isFormField(el)) return;
+    // 캡처 패널(.fp-panel) 내부 입력은 녹화 이벤트에서 제외 (캡처+녹화 동시 활성 오염 방지)
+    if (el.closest('.fp-panel')) return;
     const type = detectFieldType(el);
     if (type === 'select' || type === 'checkbox' || type === 'radio') return;
     // 다른 필드로 이동하면 이전 필드의 대기 입력을 즉시 확정 (값 유실 방지)
@@ -440,6 +548,8 @@
     if (!record.active) return;
     const el = e.target;
     if (!(el instanceof Element) || !isFormField(el)) return;
+    // 캡처 패널(.fp-panel) 내부 입력은 녹화 이벤트에서 제외 (캡처+녹화 동시 활성 오염 방지)
+    if (el.closest('.fp-panel')) return;
     const type = detectFieldType(el);
     if (type !== 'select' && type !== 'checkbox' && type !== 'radio') return;
     // 다른 필드의 대기 중인 텍스트 입력을 먼저 확정 (입력 → 선택 순서 보존)
@@ -450,42 +560,58 @@
     recordEvent(el, type, value);
   }
 
-  function startRecordingMode(presetId) {
+  function startRecordingMode(presetId, opts) {
+    opts = opts || {};
+    if (record.active && (opts.resume || record.presetId === presetId)) {
+      // 페이지 이동 후 재개 / 같은 프리셋 재시작: 버퍼를 리셋하지 않고 칩 숫자만 맞춘다
+      if (typeof opts.eventCount === 'number') {
+        record.syncedCount = opts.eventCount;
+        updateRecordChip();
+      }
+      return;
+    }
+    if (record.active) {
+      clearTimeout(record.debounceTimer);
+      record.pending = null;
+      record.active = false;
+      hideRecordChip();
+      document.removeEventListener('input', onRecordInput, true);
+      document.removeEventListener('change', onRecordChange, true);
+      document.removeEventListener('click', onRecordClick, true);
+      document.removeEventListener('keydown', onRecordKeydown, true);
+      window.removeEventListener('pagehide', onRecordPageHide);
+    }
     record.active = true;
     record.presetId = presetId;
     record.events = [];
+    record.syncedCount = typeof opts.eventCount === 'number' ? opts.eventCount : 0;
     record.lastRecordAt = 0;
     record.pending = null;
     injectStyles();
     showRecordChip();
+    updateRecordChip();
     document.addEventListener('input', onRecordInput, true);
     document.addEventListener('change', onRecordChange, true);
+    document.addEventListener('click', onRecordClick, true);
+    document.addEventListener('keydown', onRecordKeydown, true);
+    window.addEventListener('pagehide', onRecordPageHide);
   }
 
-  function stopRecordingMode() {
+  async function stopRecordingMode() {
     if (!record.active) return;
     clearTimeout(record.debounceTimer);
-    flushPendingRecord();
+    await flushPendingRecord();
     record.active = false;
     hideRecordChip();
     document.removeEventListener('input', onRecordInput, true);
     document.removeEventListener('change', onRecordChange, true);
-    const presetId = record.presetId;
-    const events = record.events.slice();
+    document.removeEventListener('click', onRecordClick, true);
+    document.removeEventListener('keydown', onRecordKeydown, true);
+    window.removeEventListener('pagehide', onRecordPageHide);
     record.presetId = null;
-    record.events = [];
     record.lastRecordAt = 0;
-    if (events.length === 0) {
-      showRecordToast('기록된 입력이 없습니다.');
-      return;
-    }
-    chrome.runtime.sendMessage({ type: 'RECORD_SAVE', presetId, events }, (resp) => {
-      if (chrome.runtime.lastError || !resp || !resp.ok) {
-        showRecordToast('저장 실패: ' + (resp && resp.error ? resp.error : '알 수 없는 오류'));
-        return;
-      }
-      showRecordToast('저장 완료! ' + events.length + '개 입력이 기록되었습니다.');
-    });
+    record.events = [];
+    record.syncedCount = 0;
   }
 
   // ---------- 순차 재생 (녹화된 행동을 타이밍대로 재생) ----------
@@ -566,7 +692,72 @@
     descriptor.set.call(el, checked);
   }
 
+  function findByVisibleText(text) {
+    const needle = String(text || '').trim();
+    if (!needle) return null;
+    let nodes;
+    try {
+      nodes = document.querySelectorAll(
+        'a, button, [role="button"], [role="link"], input[type="submit"], input[type="button"]'
+      );
+    } catch (e) {
+      return null;
+    }
+    const list = nodes ? Array.from(nodes) : [];
+    for (const el of list) {
+      const t = visibleText(el);
+      if (!t) continue;
+      if (t === needle) return el;
+      if ((t.includes(needle) || needle.includes(t)) && Math.min(t.length, needle.length) >= 2) return el;
+    }
+    return null;
+  }
+
   function applyField(field) {
+    if (field.type === 'navigate') {
+      return { ok: true, label: field.label };
+    }
+
+    if (field.type === 'click') {
+      let el = null;
+      if (field.selector) {
+        try {
+          el = document.querySelector(field.selector);
+        } catch (e) {
+          el = null;
+        }
+      }
+      if (!el) el = findByVisibleText(field.value);
+      if (!el) return { ok: false, label: field.label, reason: '요소를 찾을 수 없음' };
+      if (typeof el.click === 'function') el.click();
+      else el.dispatchEvent(new Event('click', { bubbles: true }));
+      return { ok: true, label: field.label };
+    }
+
+    if (field.type === 'keydown') {
+      let el;
+      try {
+        el = document.querySelector(field.selector);
+      } catch (e) {
+        return { ok: false, label: field.label, reason: '잘못된 셀렉터' };
+      }
+      if (!el) return { ok: false, label: field.label, reason: '요소를 찾을 수 없음' };
+      if (typeof el.focus === 'function') el.focus();
+      const key = field.value || 'Enter';
+      const opts = {
+        key: key,
+        code: key === 'Enter' ? 'Enter' : key,
+        keyCode: key === 'Enter' ? 13 : 0,
+        which: key === 'Enter' ? 13 : 0,
+        bubbles: true,
+        cancelable: true
+      };
+      el.dispatchEvent(new KeyboardEvent('keydown', opts));
+      el.dispatchEvent(new KeyboardEvent('keypress', opts));
+      el.dispatchEvent(new KeyboardEvent('keyup', opts));
+      return { ok: true, label: field.label };
+    }
+
     let el;
     try {
       el = document.querySelector(field.selector);
@@ -613,12 +804,6 @@
   }
 
   function applyPreset(preset) {
-    if (applyAbort) {
-      clearTimeout(applyAbort.timer);
-      applyAbort.observer.disconnect();
-      applyAbort = null;
-    }
-
     // 녹화된 필드(delay 포함)는 순차 재생 — 기록된 순서와 타이밍대로 적용
     const hasDelay = Array.isArray(preset.fields) && preset.fields.some((f) => Number.isFinite(f.delay));
     if (hasDelay) return replaySequential(preset);
@@ -626,10 +811,12 @@
     return new Promise((resolve) => {
       const failures = [];
       const applied = [];
+      // 호출별 격리: 재진입 시 이전 호출의 상태를 무효화하지 않아 Promise가 영원히 미해소되지 않는다.
+      const abort = { failures: preset.fields.slice(), observer: null, timer: null, done: false };
 
       function tryApply() {
-        if (!applyAbort) return;
-        const remaining = applyAbort.failures;
+        if (abort.done) return;
+        const remaining = abort.failures;
         const next = [];
         for (const field of remaining) {
           const res = applyField(field);
@@ -644,38 +831,44 @@
             next.push(field);
           }
         }
-        applyAbort.failures = next;
+        abort.failures = next;
         if (next.length === 0) {
-          clearTimeout(applyAbort.timer);
-          applyAbort.observer.disconnect();
-          applyAbort = null;
+          clearTimeout(abort.timer);
+          abort.observer.disconnect();
+          abort.done = true;
           resolve({ applied, failures: [] });
         }
       }
 
       const observer = new MutationObserver(() => {
-        if (!applyAbort) return;
-        clearTimeout(applyAbort.timer);
-        applyAbort.timer = setTimeout(tryApply, 300);
+        if (abort.done) return;
+        clearTimeout(abort.timer);
+        abort.timer = setTimeout(tryApply, 300);
       });
       observer.observe(document.documentElement, { childList: true, subtree: true });
+      abort.observer = observer;
 
-      applyAbort = {
-        failures: preset.fields.slice(),
-        observer,
-        timer: null
-      };
-      applyAbort.timer = setTimeout(tryApply, 0);
+      abort.timer = setTimeout(tryApply, 0);
 
       setTimeout(() => {
-        if (!applyAbort) return;
-        const failed = applyAbort.failures;
-        clearTimeout(applyAbort.timer);
-        applyAbort.observer.disconnect();
-        applyAbort = null;
+        if (abort.done) return;
+        const failed = abort.failures;
+        clearTimeout(abort.timer);
+        abort.observer.disconnect();
+        abort.done = true;
         resolve({ applied, failures: failed });
       }, 15000);
     });
+  }
+
+  function isSubmitElement(el) {
+    if (!(el instanceof Element)) return false;
+    if (typeof HTMLButtonElement !== 'undefined' && el instanceof HTMLButtonElement) return true;
+    if (el instanceof HTMLInputElement) {
+      const t = el.type;
+      return t === 'submit' || t === 'image' || t === 'button';
+    }
+    return false;
   }
 
   function submitForm(selector) {
@@ -689,15 +882,26 @@
             btn = null;
           }
         }
-        if (!btn) {
-          btn =
-            document.querySelector('button[type="submit"], input[type="submit"], input[type="image"]') ||
-            document.querySelector('form button') ||
-            document.querySelector('form input[type="button"]');
-        }
         if (btn) {
-          btn.click();
-          resolve({ ok: true, clicked: true });
+          if (isSubmitElement(btn)) {
+            btn.click();
+            resolve({ ok: true, clicked: true });
+            return;
+          }
+          resolve({ ok: false, reason: '선택한 요소는 제출 가능한 버튼이 아닙니다.' });
+          return;
+        }
+        btn =
+          document.querySelector('button[type="submit"], input[type="submit"], input[type="image"]') ||
+          document.querySelector('form button') ||
+          document.querySelector('form input[type="button"]');
+        if (btn) {
+          if (isSubmitElement(btn)) {
+            btn.click();
+            resolve({ ok: true, clicked: true });
+            return;
+          }
+          resolve({ ok: false, reason: '제출 가능한 버튼을 찾을 수 없습니다.' });
           return;
         }
         const form = document.querySelector('form');
@@ -718,6 +922,8 @@
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    // 자기 확장의 background에서 온 메시지만 처리 (타 확장의 APPLY_PRESET/SUBMIT_FORM 주입 차단)
+    if (sender.id !== chrome.runtime.id) return false;
     if (msg.type === 'CAPTURE_START') {
       startCaptureMode(msg.presetId);
       sendResponse({ ok: true });
@@ -729,14 +935,28 @@
       return false;
     }
     if (msg.type === 'RECORD_START') {
-      startRecordingMode(msg.presetId);
+      startRecordingMode(msg.presetId, { resume: !!msg.resume, eventCount: msg.eventCount });
       sendResponse({ ok: true });
       return false;
     }
     if (msg.type === 'RECORD_STOP') {
-      stopRecordingMode();
-      sendResponse({ ok: true });
-      return false;
+      stopRecordingMode().then(() => {
+        sendResponse({ ok: true });
+      });
+      return true;
+    }
+    if (msg.type === 'APPLY_ACTION') {
+      const field = msg.field;
+      const run = async () => {
+        if (field && field.selector && field.type !== 'navigate') {
+          await waitForElement(field.selector, 5000);
+        }
+        return applyField(field);
+      };
+      run().then((result) => {
+        sendResponse({ result: result });
+      });
+      return true;
     }
     if (msg.type === 'APPLY_PRESET') {
       applyPreset(msg.preset).then((result) => {
@@ -757,6 +977,9 @@
   function checkUrlChange() {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
+    if (record.active) {
+      recordAction(null, 'navigate', location.href, '페이지 이동');
+    }
     chrome.runtime.sendMessage({ type: 'AUTO_APPLY_CHECK', url: location.href }, (resp) => {
       if (chrome.runtime.lastError || !resp || !resp.ok) return;
       for (const preset of resp.data) {

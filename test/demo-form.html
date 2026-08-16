@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>폼 프리셋 데모</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f3f4f6; margin: 0; padding: 32px; color: #111827; }
+    main { max-width: 440px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px 28px 28px; box-shadow: 0 8px 24px rgba(0,0,0,.06); }
+    h1 { font-size: 20px; margin: 0 0 6px; }
+    .sub { color: #6b7280; font-size: 13px; margin: 0 0 20px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: #4b5563; margin: 12px 0 4px; }
+    input[type=text], input[type=email], select, textarea {
+      width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px;
+    }
+    .row { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>회원가입</h1>
+    <p class="sub">폼 프리셋 데모 — 한 번 녹화하면 다음엔 재생만 하면 됩니다</p>
+    <form>
+      <label>이름</label>
+      <input type="text" name="name" placeholder="이름">
+      <label>이메일</label>
+      <input type="email" name="email" placeholder="이메일">
+      <label>부서</label>
+      <select name="dept">
+        <option value="">선택하세요</option>
+        <option value="eng">엔지니어링</option>
+        <option value="sales">영업</option>
+      </select>
+      <label class="row"><input type="checkbox" name="agree"> 약관에 동의합니다</label>
+    </form>
+  </main>
+</body>
+</html>

@@ -6,7 +6,7 @@
 >
 > **관련 문서**: `.sisyphus/notepads/form-preset-extension/decisions.md`(결정 D1~), `.sisyphus/plans/*.md`(라운드 계획), `README.md`(사용자 매뉴얼)
 >
-> **최종 갱신**: 2026-08-16 (Round 6)
+> **최종 갱신**: 2026-08-16 (D28 완성도 패스)
 
 ---
 
@@ -26,8 +26,8 @@
 ### R1. 프리셋 관리 (기본 CRUD) — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
-| R1-1 | 사이트별 프리셋 생성/조회/수정/삭제 | popup에서 전 기능 동작, 하드코딩 사이트 없음 |
-| R1-2 | 프리셋 = 이름 + 사이트 패턴(urlPattern) + 필드 목록 | 데이터 모델(§4) 준수 |
+| R1-1 | 사이트별 프리셋 생성/조회/수정/삭제 (여러 개 선택 삭제 포함) | popup에서 전 기능 동작, 하드코딩 사이트 없음 |
+| R1-2 | 프리셋 = 이름 + 사이트 패턴(`urlPattern` 대표 + `urlPatterns` N개) + 필드 목록 | 데이터 모델(§4) 준수 |
 | R1-3 | 사이트 패턴 매칭 (호스트명 wildcard `*.example.com`, 경로 패턴 `example.com/*`) | `matchUrlPattern()` 정확 동작 |
 | R1-4 | 자동 적용(autoApply): 페이지 진입 시 매칭 프리셋 자동 채움 | `tabs.onUpdated` → `APPLY_PRESET` |
 | R1-5 | 하위 호환: 레거시(필드 단위 민감 암호화) 저장 데이터 시작 시 자동 마이그레이션 | migrateLegacyStorage 1회 이전 (M1~M2 검증) |
@@ -74,7 +74,7 @@
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
 | R6-1 | 프리셋 전체(모든 필드 값)를 프리셋별 blob `sec:preset:<id>`로 AES-256-GCM 암호화 | savePreset/getPresetById |
-| R6-2 | `presets` 키는 평문 인덱스 `[{id,name,urlPattern,autoApply,updatedAt}]` — 필드 값 미포함, 자동 적용 매칭은 인덱스로 복호화 없이 수행 | getPresetIndex/AUTO_APPLY_CHECK |
+| R6-2 | `presets` 키는 평문 인덱스 `[{id,name,urlPattern,urlPatterns,autoApply,updatedAt}]` — 필드 값 미포함, 자동 적용 매칭은 인덱스로 복호화 없이 수행 | getPresetIndex/AUTO_APPLY_CHECK |
 | R6-3 | AES-256-GCM, 키 자동 생성 (`vault_key_v1`), 매 저장 새 IV | secure-store.js |
 | R6-4 | 보호가 감지 품질과 분리: 감지가 불완전해도 저장소 평문 0 (필드별 암호화 폐기) | 모든 값이 blob 안 |
 | R6-5 | 복호화 지점: PRESET_LIST(편집용), APPLY_PRESET/AUTO_APPLY_CHECK/그룹 실행(적용용), EXPORT_DATA(백업용) | getPresetById |
@@ -97,9 +97,9 @@
 ### R8. 회귀 테스트 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
-| R8-1 | `test/encryption-verify.mjs`: mock chrome으로 실제 background.js 구동, 프리셋 blob 암호화 S1~S10 + 레거시 마이그레이션 M1~M2 검증 | `npm run test:encrypt` 전부 PASS |
+| R8-1 | `test/encryption-verify.mjs`: mock chrome으로 실제 background.js 구동, 프리셋 blob 암호화 S1~S11 + 레거시 마이그레이션 M1~M2 검증 | `npm run test:encrypt` 전부 PASS |
 | R8-2 | `test/record-replay-verify.mjs`: mock DOM+chrome으로 녹화→저장→재생 통합 검증 (전체 암호화 + sensitive 마스킹 신호 보존) | `npm run test:replay` 전부 PASS |
-| R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html) + SW `chrome.storage.local` 직접 검증. A 기본 흐름(생성→녹화→저장→재생), B 녹화 엣지케이스(머지/flush/radio/checkbox 해제/빈 값/change-flush), C PII(저장소 평문 0 + popup 마스킹 + vault 키), D 재생(delay 순차 실측/urlPattern 불일치/autoApply 재진입), E 레거시 마이그레이션(시드→재시작→자동 이전) | `node --experimental-default-type=module test/browser-e2e-verify.mjs` 40/40 PASS |
+| R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html + journey-*.html) + SW `chrome.storage.local` 직접 검증. A 기본, B 녹화 엣지, C PII, D 재생, E 레거시 마이그레이션, **F 멀티페이지 여정**(검색→클릭→이동→상품 재생, 칩 복원, 자동적용 제외) | `npm run test:e2e` **49/49 PASS** |
 
 ### R9. 녹화/재생 방식 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -110,6 +110,47 @@
 | R9-4 | delay 캡처: 직전 행동 후 경과 ms (0~5000 상한) | RECORD_MAX_DELAY |
 | R9-5 | 재생: delay 있는 프리셋은 순차 재생(지연 + 5초 폴링), 없으면 기존 병렬 적용 유지 | replaySequential |
 | R9-6 | 기존 프리셋/그룹/민감/내보내기 로직 하위 호환 | fields[] 재사용 + `delay`만 추가 |
+
+### R11. 멀티페이지 사용자 여정 녹화/재생 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R11-1 | 녹화 버퍼는 background + `chrome.storage.session` (`recordSessions`). content 메모리만 믿지 않음 | RECORD_APPEND, 페이지 이동 후 이벤트 유지 |
+| R11-2 | 페이지 이동 후에도 같은 탭 녹화 재개 (칩 `녹화 중 · N개` + 종료) | `tabs.onUpdated` complete → RECORD_START resume |
+| R11-3 | 기록 타입: 기존 폼 + `click` + `keydown`(Enter) + `navigate`(URL) | fields[].type |
+| R11-4 | 녹화 중 클릭을 가로채지 않음 (preventDefault 금지) | onRecordClick 관찰만 |
+| R11-5 | 재생: 여정 프리셋은 같은 탭 background 순차 재생. `startUrl`로 시작 페이지 정렬 | replayJourney / APPLY_ACTION |
+| R11-6 | 클릭 재생 시 셀렉터 실패하면 보이는 글자 폴백 | findByVisibleText |
+| R11-7 | 여정 프리셋은 자동 적용하지 않음 | applyAutoPreset / AUTO_APPLY_CHECK 스킵 |
+| R11-8 | 기존 폼 전용 녹화/재생·캡처·그룹·암호화 하위 호환 | isJourneyPreset가 아니면 기존 경로 |
+| R11-9 | 사이트 전용 셀렉터/URL 하드코딩 금지 | 일반 셀렉터 + 텍스트 폴백 |
+
+### R12. 녹화 중 방문 사이트 N개 자동 허용 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R12-1 | 녹화 시작 사이트 + 이동한 http(s) 사이트를 `urlPatterns`에 중복 없이 저장 (최대 20) | RECORD_START/STOP, session.allowedSites |
+| R12-2 | `chrome://` 등 제한 URL은 허용 목록에 넣지 않음 | urlToSitePattern |
+| R12-3 | 같은 호스트의 경로만 바뀌면 사이트가 늘지 않음. 기존 와일드카드가 커버하면 추가하지 않음 | mergeUrlPatterns |
+| R12-4 | 재생·자동 적용·팝업 배지는 N개 중 하나라도 맞으면 허용 | matchPresetUrl |
+| R12-5 | `urlPattern` 문자열은 대표(첫) 사이트로 유지. `urlPatterns` 없으면 `[urlPattern]` | 하위 호환 |
+| R12-6 | 편집 UI는 한 줄에 하나(textarea). 목록은 `example.com 외 N개` | popup |
+| R12-7 | 그룹 실행은 대표 `urlPattern`으로 탭을 연다 (여정으로 바꾸지 않음) | patternToUrl |
+
+### R13. 녹화 이후 필드 표시 이름 수정 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R13-1 | 프리셋 편집에서 각 필드의 표시 이름(`fields[].label`)을 수정할 수 있다 | popup `data-label-edit` |
+| R13-2 | 저장 후 목록 카드·재편집에 새 이름이 반영된다 | PRESET_UPDATE |
+| R13-3 | 공백 이름은 저장 시 `필드`로 되돌린다 | normalizeFieldLabels |
+| R13-4 | 값/민감/삭제/셀렉터 편집은 유지 | renderFields |
+
+### R14. 프리셋 여러 개 한 번에 삭제 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R14-1 | 목록에서 프리셋을 여러 개 선택해 한 번에 삭제 | 체크박스 + 선택 삭제 |
+| R14-2 | 전체 선택/해제, 0개면 삭제 버튼 비활성 | 선택 툴바 |
+| R14-3 | 확인 창에 삭제 개수 표시. 확인 없이 삭제 금지 | confirm |
+| R14-4 | blob + 인덱스 정리, 그룹 스텝에서 해당 presetId 제거 | PRESET_DELETE_MANY |
+| R14-5 | 카드/편집의 1개 삭제는 유지 | PRESET_DELETE |
 
 ### R10. 개인정보 자동 감지 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -143,7 +184,7 @@
 // key: "presets" — 평문 인덱스 (필드 값 없음. 자동 적용 매칭/목록 fallback용)
 {
   presets: [
-    { id: "uuid", name: "프리셋 이름", urlPattern: "example.com", autoApply: false, updatedAt: 0 }
+    { id: "uuid", name: "프리셋 이름", urlPattern: "example.com", urlPatterns: ["example.com"], autoApply: false, updatedAt: 0 }
   ]
 }
 
@@ -152,18 +193,24 @@
 {
   id: "uuid",
   name: "프리셋 이름",
-  urlPattern: "example.com",            // wildcard: *.example.com, example.com/*
+  urlPattern: "example.com",            // 대표(첫) 사이트. wildcard: *.example.com, example.com/*
+  urlPatterns: ["example.com"],         // 허용 사이트 N개 (R12). 없으면 [urlPattern]
   fields: [
     {
       id: "uuid",
       label: "표시 이름",
       selector: "#user-name",           // CSS selector
       value: "실제 값",                  // 모든 필드 값이 blob 안에 암호화 저장됨
-      type: "text" | "select" | "checkbox" | "radio" | "textarea",
+      type: "text" | "select" | "checkbox" | "radio" | "textarea" | "click" | "keydown" | "navigate",
       sensitive: false,                 // 마스킹 표시 신호 (저장 보호와 무관 — 전체가 암호화됨)
       delay: 0,                         // 녹화 전용. 직전 행동 후 경과 ms (0~5000), 기존 필드엔 없음
+      // type 확장(R11): "click" | "keydown" | "navigate"
+      // click: selector + value(보이는 글자, 재생 폴백)
+      // keydown: selector + value("Enter")
+      // navigate: selector "" + value(절대 URL)
     }
   ],
+  startUrl: "",                         // 여정 녹화 시작 탭 URL (선택, R11)
   autoApply: false,
   createdAt: 0,
   updatedAt: 0,
@@ -199,13 +246,15 @@
 
 | 메시지 | 방향 | 설명 |
 |--------|------|------|
-| PRESET_LIST / CREATE / UPDATE / DELETE | popup↔background | 프리셋 CRUD (LIST는 복호화된 값 반환) |
+| PRESET_LIST / CREATE / UPDATE / DELETE / DELETE_MANY | popup↔background | 프리셋 CRUD (LIST는 복호화된 값 반환, DELETE_MANY는 ids[]) |
 | GROUP_LIST / CREATE / UPDATE / DELETE | popup↔background | 그룹 CRUD |
 | RUN_GROUP / RUN_NEXT / RUN_ABORT / RUN_STATUS | popup→background | 그룹 실행 제어/조회 |
 | CAPTURE_START / STOP / STATUS | popup→background→content | 캡처 모드 토글/조회 |
 | CAPTURE_SAVE_FIELD | content→background | 캡처된 필드 저장 (프리셋 blob 갱신) |
 | RECORD_START / STOP / SAVE | popup/content↔background | 녹화 모드 토글 + 녹화 저장 (전체 프리셋 암호화, sensitive 신호 보존) |
-| APPLY_PRESET | popup/background→content | 프리셋 적용 (background가 blob 복호화 후 전달) |
+| RECORD_APPEND | content→background | 확정된 행동 1건을 세션 버퍼에 추가 (페이지 이동 생존) |
+| APPLY_ACTION | background→content | 여정 재생 중 한 행동(값/클릭/Enter) 적용 |
+| APPLY_PRESET | popup/background→content | 프리셋 적용 (여정이면 background 같은 탭 재생, 아니면 content) |
 | AUTO_APPLY_CHECK | content→background | 자동 적용 매칭 조회 |
 | GET_CURRENT_URL | popup→background | 현재 탭 URL |
 | EXPORT_DATA / IMPORT_DATA | popup→background | 백업/복원 (민감 복호화/재암호화) |
@@ -216,24 +265,28 @@
 병렬 작업 시 **각 작업이 이 체크리스트를 충족하는지**로 처리 여부를 판정한다. 요구사항 추가/변경 시 이 목록도 갱신한다.
 
 ### 통합 (모든 라운드 공통)
-- [ ] `npm run check` exit 0 (node --check + manifest 파싱)
-- [ ] `npm run build` exit 0, dist가 저장소와 일치 (빌드 후 git status 깨끗)
-- [ ] `npm run test:encrypt` 12/12 PASS (blob 암호화 S1~S10 + 마이그레이션 M1~M2)
-- [ ] `npm run test:pii` 30/30 PASS (PII 감지 판정)
-- [ ] `npm run test:replay` PASS (녹화→저장→재생 통합)
-- [ ] 변경 파일이 요구사항 ID(R1~R10)에 대응 — 어느 요구사항도 건드리지 않는 변경은 의심
+- [x] `npm run check` exit 0 (node --check + manifest 파싱)
+- [x] `npm run build` exit 0, dist가 저장소와 일치 (빌드 후 git status 깨끗)
+- [x] `npm run test:encrypt` 13/13 PASS (blob 암호화 S1~S11 + 마이그레이션 M1~M2)
+- [x] `npm run test:pii` 30/30 PASS (PII 감지 판정)
+- [x] `npm run test:replay` PASS (녹화→저장→재생 통합 + 이중 RECORD_START 가드)
+- [x] 변경 파일이 요구사항 ID(R1~R14)에 대응 — 어느 요구사항도 건드리지 않는 변경은 의심
 
 ### 기능별
-- [ ] R1: 프리셋 CRUD + 패턴 매칭 + autoApply 동작
-- [ ] R2: 캡처 하이라이트/패널/Enter 흐름/타입별 저장
-- [ ] R3: 적용 모드 SPA 호환 + 타입별 세팅 + 패턴 검증
-- [ ] R4: 그룹 순차 실행/auto·manual 제출/badge/중지
-- [ ] R5: 내보내기(민감 복호화)/가져오기(검증+재암호화)/제한
-- [ ] R6: 프리셋 전체 암호화 (인덱스/blob/복호화/재암호화/정리/마이그레이션)
-- [ ] R7: 목록·편집 복사/마스킹/빈 값/더보기 토글
-- [ ] R8: 암호화·녹화재생 통합 검증 스크립트 유지
-- [ ] R9: 녹화 → 세팅 → 종료 → 재생 순서/타이밍 재생 + 기존 프리셋 하위 호환
-- [ ] R10: PII 자동 감지 (메타데이터/값 정규식/오탐 방지) + 마스킹 신호 보존
+- [x] R1: 프리셋 CRUD + 패턴 매칭 + autoApply 동작
+- [x] R2: 캡처 하이라이트/패널/Enter 흐름/타입별 저장
+- [x] R3: 적용 모드 SPA 호환 + 타입별 세팅 + 패턴 검증
+- [x] R4: 그룹 순차 실행/auto·manual 제출/badge/중지
+- [x] R5: 내보내기(민감 복호화)/가져오기(검증+재암호화)/제한
+- [x] R6: 프리셋 전체 암호화 (인덱스/blob/복호화/재암호화/정리/마이그레이션)
+- [x] R7: 목록·편집 복사/마스킹/빈 값/더보기 토글
+- [x] R8: 암호화·녹화재생 통합 검증 스크립트 유지
+- [x] R9: 녹화 → 세팅 → 종료 → 재생 순서/타이밍 재생 + 기존 프리셋 하위 호환
+- [x] R10: PII 자동 감지 (메타데이터/값 정규식/오탐 방지) + 마스킹 신호 보존
+- [x] R11: 여정 녹화(이동 후 재개/클릭/Enter/navigate) + 같은 탭 재생 + 폼 전용 하위 호환
+- [x] R12: 녹화 중 방문 사이트 N개 자동 허용 + 레거시 urlPattern 하위 호환
+- [x] R13: 편집에서 필드 표시 이름 수정 + 공백 시 `필드`
+- [x] R14: 프리셋 여러 개 선택 삭제 + 그룹 스텝 정리
 
 ## 7. 확정 결정 사항 요약 (decisions.md 상세)
 
@@ -257,6 +310,16 @@
 | D16 | PII 자동 감지 채택 (pii-detect.js, 값 정규식+체크섬, 오탐 방지 규칙) |
 | D17 | 프리셋별 전체 암호화 전환 (`sec:preset:<id>` blob + 평문 인덱스, 감지는 마스킹 전용 — D16 역할 변경) |
 | D18 | 브라우저 E2E 채택 (Playwright headful 실제 확장 로드) — E2E로 발견된 버그 1건 수정: urlPattern에 포트 포함 시 `matchUrlPattern`이 `url.hostname`(포트 없음)과 비교해 **절대 매칭 실패** → 재생/자동적용 무력화. 포트 추출 후 별도 비교(패턴에 포트 있으면 포트도 일치해야 매칭). popup `hostMatchesPattern`도 동일 수정 |
+| D19 | 멀티페이지 사용자 여정 한 프리셋 녹화: 당시 제품은 불가, MV3 조건부 가능으로 판정 |
+| D20 | 여정 녹화 구현: recordSessions + click/keydown/navigate + 같은 탭 재생 + startUrl. 여정 자동 적용 없음. 그룹은 그대로. |
+| D21 | 제품 런타임은 MV3 확장. Playwright는 E2E 전용. Playwright 베이스로 바꾸는 것은 이 제품(스토어 배포·로그인된 Chrome)에 더 낫지 않음. |
+| D22 | 여정 녹화 Playwright E2E(F) 추가. localhost 4페이지, 네이버 실접속 없음. 49/49 PASS. |
+| D23 | 다른 프로젝트용 시작 메타프롬프트(`프로젝트-시작-메타프롬프트.md`) + 생성기. 질문과 구현의 서류 수준을 분리. |
+| D24 | README 사용법 움짤: 실제 확장 화면 GIF 3개 (`docs/gif/`). `npm run gif`로 재촬영. |
+| D25 | 녹화 중 방문 사이트를 `urlPatterns` N개로 자동 저장. 매칭은 아무 패턴이나. `urlPattern`은 대표(첫) 사이트. |
+| D26 | 녹화(및 캡처) 후 편집 화면에서 필드 표시 이름을 수정할 수 있다. 스키마 변경 없음. |
+| D27 | 프리셋 여러 개 선택 삭제. `PRESET_DELETE_MANY`, 확인 창, 그룹 스텝 정리. |
+| D28 | 완성도 패스: 같은 프리셋 `RECORD_START` 버퍼 유지, 여정 배지, 여정 자동적용 UI 차단, 키 오류를 popup에 표시, 필드 값 읽기 정규화. fill-form 대체 스키마는 흡수하지 않음. |
 
 ## 8. 보류/미구현 항목
 
@@ -264,7 +327,8 @@
 |------|------|------|
 | options_page (전용 설정 페이지) | 보류 확정 | popup 프리셋 관리와 기능 중복 (D10/D14) |
 | `프리셋-정보-관리` 브랜치 병합 | 보류 | 별도 구현체, 가치 기능 전부 흡수 완료 (D8/D12), 참조용 보관 |
-| 브라우저 E2E 테스트 (Playwright) | ✅ 해소 (R8-3) | `npm install playwright` 후 `test/browser-e2e-verify.mjs` 40/40 PASS (2026-08-16, R7) |
+| 브라우저 E2E 테스트 (Playwright) | ✅ 해소 (R8-3, D22) | `npm run test:e2e` 49/49 PASS (A~E + F 여정, 2026-08-16) |
+| 멀티페이지 사용자 여정 녹화/재생 (한 프리셋, 클릭·검색·페이지 이동) | ✅ 해소 (R11, D20) | recordSessions + 클릭/Enter/이동 녹화 + 같은 탭 재생. 동적 사이트의 셀렉터 불안정은 제품 한계로 README에 명시. |
 
 ## 9. 변경 이력
 
@@ -274,3 +338,12 @@
 | 2026-08-16 | R5 | 녹화/재생(R9) + PII 자동 감지(R10) 추가, 필드 `delay`, RECORD_* 메시지, test:pii | — |
 | 2026-08-16 | R6 | 프리셋별 전체 암호화 전환(D17): 평문 인덱스 + `sec:preset:<id>` blob, 레거시 마이그레이션, 감지=마스킹 전용, test:encrypt 12/12 + test:replay | — |
 | 2026-08-16 | R7 | 브라우저 E2E(R8-3, D18): `npm install playwright`, `test/browser-e2e-verify.mjs` 40/40 (A 기본/B 녹화/C PII/D 재생/E 마이그레이션). E2E로 실제 버그 발견·수정: urlPattern 포트 미처리로 재생/자동적용 무력화 (matchUrlPattern·hostMatchesPattern). §8 보류 해소. | — |
+| 2026-08-16 | D19 | 멀티페이지 사용자 여정 한 프리셋 녹화: **당시 불가 / MV3 조건부 가능**. 메타프롬프트 `메타-프롬프트-멀티페이지-사용자여정-녹화.md`. | — |
+| 2026-08-16 | D20 | 여정 녹화 구현(R11): session 버퍼, click/keydown/navigate, 같은 탭 재생, startUrl, 자동 적용 제외. 메타프롬프트 `메타-프롬프트-멀티페이지-여정-녹화-구현.md`. | — |
+| 2026-08-16 | D21 | 제품 런타임은 확장, Playwright는 E2E 전용. Playwright 베이스 교체는 이 제품에 더 낫지 않음. | — |
+| 2026-08-16 | D22 | 여정 E2E(F): journey-*.html + 시나리오 F. `npm run test:e2e` 49/49. 메타프롬프트 `메타-프롬프트-여정-E2E.md`. | — |
+| 2026-08-16 | D23 | 이식용 시작 메타프롬프트 + 생성기. | — |
+| 2026-08-16 | D25 | 녹화 다중 사이트 허용(R12): 이동한 사이트를 `urlPatterns`에 자동 추가. 메타프롬프트 `메타-프롬프트-녹화-다중사이트-허용.md`. | — |
+| 2026-08-16 | D26 | 녹화 후 필드명 수정(R13): 편집 화면에서 `fields[].label` 직접 수정. 메타프롬프트 `메타-프롬프트-녹화-필드명-수정.md`. | — |
+| 2026-08-16 | D27 | 프리셋 여러 개 삭제(R14): 체크박스 + `PRESET_DELETE_MANY`. 메타프롬프트 `메타-프롬프트-프리셋-여러개-삭제.md`. | — |
+| 2026-08-16 | D28 | 완성도 패스: 녹화 재시작 가드, 여정 배지/자동적용 비활성, vault 키 오류 안내, 필드 값 정규화. 메타프롬프트 `메타-프롬프트-완성도-향상.md`. | — |

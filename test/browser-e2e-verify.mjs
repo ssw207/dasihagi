@@ -21,6 +21,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = path.join(ROOT, 'dist');
 const PORT = 8765;
 const FORM_URL = `http://127.0.0.1:${PORT}/`;
+const JOURNEY_HOME = `http://127.0.0.1:${PORT}/j/home`;
 const PATTERN = `127.0.0.1:${PORT}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -123,6 +124,10 @@ async function beginRecord(popup) {
 
 async function clickStopRecord() {
   await formPage.click('#fp-record-stop');
+}
+
+async function waitRecordChip(timeout = 15000) {
+  await formPage.waitForSelector('.fp-record-chip', { timeout });
 }
 
 async function waitBlob(id, minFields = 1) {
@@ -443,6 +448,66 @@ async function scenarioD3AutoApply() {
   await popup.close().catch(() => {});
 }
 
+// ---------- 시나리오 F: 멀티페이지 여정 녹화/재생 ----------
+async function scenarioF() {
+  await formPage.goto(JOURNEY_HOME);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, '여정E2E');
+  await formPage.evaluate(() => document.querySelector('.fp-record-chip')?.remove());
+  await clickRecord(popup);
+  await waitRecordChip();
+
+  await formPage.fill('#q', '수저세트');
+  await sleep(500);
+  await Promise.all([formPage.waitForURL(/\/j\/results/), formPage.click('#search-btn')]);
+  await waitRecordChip();
+  const chipAfterNav = await formPage.isVisible('.fp-record-chip');
+  ok('F2 페이지 이동 후 녹화 칩 복원', chipAfterNav);
+
+  await Promise.all([formPage.waitForURL(/\/j\/compare/), formPage.click('#price-more')]);
+  await waitRecordChip();
+
+  await formPage.fill('#q2', '인기 수저세트');
+  await sleep(500);
+  await formPage.click('#confirm-btn');
+  await formPage.waitForSelector('#confirmed:not([hidden])');
+  await Promise.all([formPage.waitForURL(/\/j\/product/), formPage.click('#product-1')]);
+  await waitRecordChip();
+  await formPage.click('#fp-record-stop');
+
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 4);
+  const types = (blob?.fields || []).map((f) => f.type);
+  ok('F1 필드 4개 이상', blob && blob.fields.length >= 4, 'n=' + (blob && blob.fields.length));
+  ok('F1 text 기록', types.includes('text'), types.join(','));
+  ok('F1 click 기록', types.includes('click'), types.join(','));
+  ok('F1 navigate 기록', types.includes('navigate'), types.join(','));
+  ok('F1 startUrl이 홈', !!(blob && blob.startUrl && blob.startUrl.includes('/j/home')), String(blob && blob.startUrl));
+  const hasQuery = (blob?.fields || []).some((f) => String(f.value || '').includes('수저세트'));
+  ok('F1 검색어 값 보존', hasQuery);
+
+  await formPage.goto(FORM_URL);
+  await formPage.bringToFront();
+  const popup2 = await openPopup();
+  await popup2.click('.preset-card:has-text("여정E2E") [data-act="replay"]');
+  await formPage.waitForURL(/\/j\/product/, { timeout: 60000 });
+  const productId = await formPage.textContent('#product-id');
+  ok('F3 재생 후 상품 페이지', productId && productId.trim() === '1', 'id=' + productId);
+  await popup2.close().catch(() => {});
+
+  const popup3 = await openPopup();
+  await popup3.click('.preset-card:has-text("여정E2E") [data-act="edit"]');
+  await popup3.check('#ed-autoapply');
+  await popup3.click('#btn-save-preset');
+  await popup3.waitForSelector('#toast.show');
+  await popup3.close().catch(() => {});
+  await formPage.goto(JOURNEY_HOME);
+  await sleep(4000);
+  const stayedHome = /\/j\/home/.test(formPage.url());
+  ok('F4 여정은 자동 적용되지 않음', stayedHome, formPage.url());
+}
+
 // ---------- 시나리오 E: 마이그레이션 ----------
 async function scenarioE() {
   const legacyPreset = {
@@ -500,16 +565,25 @@ async function scenarioE() {
 }
 
 async function main() {
+  const pageFiles = {
+    '/': 'test-form.html',
+    '/j/home': 'journey-home.html',
+    '/j/results': 'journey-results.html',
+    '/j/compare': 'journey-compare.html',
+    '/j/product': 'journey-product.html'
+  };
   const server = http.createServer(async (req, res) => {
     try {
-      if (req.url === '/') {
-        const html = await readFile(path.join(ROOT, 'test', 'test-form.html'));
+      const pathname = new URL(req.url || '/', `http://127.0.0.1:${PORT}`).pathname;
+      const file = pageFiles[pathname];
+      if (file) {
+        const html = await readFile(path.join(ROOT, 'test', file));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
-      } else {
-        res.writeHead(404);
-        res.end('not found');
+        return;
       }
+      res.writeHead(404);
+      res.end('not found');
     } catch (e) {
       res.writeHead(500);
       res.end(String(e));
@@ -554,6 +628,7 @@ async function main() {
     await runScenario('D1: delay 순차 재생', scenarioD1Delay);
     await runScenario('D2: urlPattern 불일치', scenarioD2Mismatch);
     await runScenario('D3: autoApply 재진입', scenarioD3AutoApply);
+    await runScenario('F: 멀티페이지 여정', scenarioF);
     await runScenario('E: 레거시 마이그레이션', scenarioE);
   } finally {
     await context.close().catch(() => {});

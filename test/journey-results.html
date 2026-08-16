@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>검색 결과</title></head>
+<body>
+  <h1>검색 결과</h1>
+  <p>검색어: <span id="q-echo"></span></p>
+  <p><a id="price-more" href="/j/compare">가격비교 더보기</a></p>
+  <script>
+    document.getElementById('q-echo').textContent = new URLSearchParams(location.search).get('q') || '';
+  </script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>가격비교</title></head>
+<body>
+  <h1>가격비교</h1>
+  <p>
+    <label>비교 검색 <input type="text" id="q2" name="q2" placeholder="가격비교 검색"></label>
+    <button type="button" id="confirm-btn">확인</button>
+  </p>
+  <p id="confirmed" hidden>확인됨</p>
+  <ul>
+    <li><a id="product-1" href="/j/product?id=1">인기 수저세트 A</a></li>
+    <li><a id="product-2" href="/j/product?id=2">수저세트 B</a></li>
+  </ul>
+  <script>
+    document.getElementById('confirm-btn').addEventListener('click', () => {
+      document.getElementById('confirmed').hidden = false;
+    });
+  </script>
+</body>
+</html>
