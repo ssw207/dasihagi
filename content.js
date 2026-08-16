@@ -168,6 +168,8 @@
   }
 
   function onCaptureClick(e) {
+    // 프리셋 등록 폼 패널 내부 클릭은 절대 DOM 선택(pick) 모드를 트리거하지 않는다.
+    if (panelEl && e.target instanceof Element && e.target.closest('.fp-panel')) return;
     const target = e.target instanceof Element ? e.target.closest('input, select, textarea') : null;
     if (!target || !isFormField(target)) return;
     e.preventDefault();
@@ -189,11 +191,16 @@
     let valueHtml = '';
     if (isBoolean) {
       valueHtml =
+        '<div id="fp-value-row" style="display:none">' +
         '<label class="fp-check"><input type="checkbox" id="fp-value" ' +
         (el.checked ? 'checked' : '') +
-        '><span>체크된 상태로 저장</span></label>';
+        '><span>체크된 상태로 저장</span></label>' +
+        '</div>';
     } else {
-      valueHtml = '<label for="fp-value">저장할 값</label><input type="text" id="fp-value" autocomplete="off">';
+      valueHtml =
+        '<div id="fp-value-row" style="display:none">' +
+        '<label for="fp-value">저장할 값</label><input type="text" id="fp-value" autocomplete="off">' +
+        '</div>';
     }
 
     panelEl.innerHTML =
@@ -203,19 +210,33 @@
       '<div class="fp-chip">' + escapeHtml(generateSelector(el)) + '</div>' +
       valueHtml +
       '<div class="fp-actions"><button class="fp-save" id="fp-save">저장</button><button class="fp-cancel" id="fp-cancel">취소</button></div>' +
-      '<div class="fp-hint">계속 캡처 모드가 유지됩니다. 다른 필드를 클릭해 추가로 저장하세요.</div>' +
+      '<div class="fp-hint">표시 이름 입력 후 Enter → 값 입력, 값 입력 후 Enter로 저장합니다. 계속 캡처 모드가 유지됩니다.</div>' +
       '<div class="fp-status" id="fp-status" style="display:none"></div>';
 
     document.body.appendChild(panelEl);
 
-    panelEl.querySelector('#fp-save').addEventListener('click', () => {
+    const labelInput = panelEl.querySelector('#fp-label');
+    const valueRow = panelEl.querySelector('#fp-value-row');
+    const valueInput = panelEl.querySelector('#fp-value');
+
+    function isImeComposing(e) {
+      return e.isComposing || e.keyCode === 229;
+    }
+
+    function revealValue() {
+      valueRow.style.display = 'block';
+      valueInput.focus();
+      if (!isBoolean) valueInput.select();
+    }
+
+    function saveFromPanel() {
       const field = {
         id: crypto.randomUUID(),
-        label: panelEl.querySelector('#fp-label').value.trim() || label,
+        label: labelInput.value.trim() || label,
         selector: generateSelector(el),
         value: isBoolean
-          ? String(panelEl.querySelector('#fp-value').checked)
-          : panelEl.querySelector('#fp-value').value,
+          ? String(valueInput.checked)
+          : valueInput.value,
         type: type
       };
       if (!isBoolean && !field.value) {
@@ -223,12 +244,26 @@
         return;
       }
       saveField(field);
-    });
+    }
 
+    panelEl.querySelector('#fp-save').addEventListener('click', saveFromPanel);
     panelEl.querySelector('#fp-cancel').addEventListener('click', closePanel);
     panelEl.addEventListener('click', (e) => e.stopPropagation());
-    panelEl.querySelector('#fp-label').focus();
-    if (!isBoolean) panelEl.querySelector('#fp-label').select();
+
+    labelInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || isImeComposing(e)) return;
+      e.preventDefault();
+      revealValue();
+    });
+
+    valueInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || isImeComposing(e)) return;
+      e.preventDefault();
+      saveFromPanel();
+    });
+
+    labelInput.focus();
+    if (!isBoolean) labelInput.select();
   }
 
   function showStatus(text, isError) {
