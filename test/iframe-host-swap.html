@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>iframe src 교체</title></head>
+<body>
+  <h1>메뉴 후 iframe 교체</h1>
+  <iframe id="admin" src="about:blank" title="어드민" style="width:100%;height:320px;border:1px solid #ccc"></iframe>
+  <script>
+    setTimeout(function () {
+      document.getElementById('admin').src = '/iframe-form';
+    }, 800);
+  </script>
+</body>
+</html>

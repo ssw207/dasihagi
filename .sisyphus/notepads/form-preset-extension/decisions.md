@@ -1,5 +1,14 @@
 # Decisions
 
+## [2026-08-30] QA 엣지케이스 도출·실행
+- **D36**: 사용자("QA 팀으로 엣지케이스 테스트 케이스를 도출하고 QA진행"). 5역할 카탈로그는 `QA-엣지케이스.md`. 빈틈은 `npm run test:qa`(22)와 E2E I 중첩 iframe / J src 교체 / K 작은 iframe / L 유니코드로 실행. e2e **71/71**. 파일 input·sandbox iframe은 한계로 남김. 메타프롬프트: `메타-프롬프트-QA-엣지케이스-진행.md`.
+
+## [2026-08-30] 늦게 뜨는 iframe 녹화 합류
+- **D35**: 사용자("iframe 기반 사이트는 녹화하기 기능이 동작하지 않는다 검토필요"). 이미 로드된 같은 origin iframe(E2E H)은 D32로 된다. 껍데기만 먼저 뜨고 iframe이 나중에 생기거나 src가 바뀌면 `tabs.onUpdated`가 안 떠 `RECORD_START`가 새 문서에 없다. content가 `RECORD_STATUS`(tabId 없으면 `sender.tab.id`)로 합류하고, `webNavigation.onCompleted`가 프레임 complete에서 재개한다. iframe URL은 탭 `navigate`로 남기지 않는다(재생이 껍데기 대신 iframe으로 탭을 옮김). sandbox iframe은 여전히 불가. 메타프롬프트: `메타-프롬프트-iframe-녹화-검토.md`.
+
+## [2026-08-30] 기획서 역생성
+- **D34**: 사용자("현재 프로젝트 기반으로 기획서를 역으로 생성"). 구현·스키마 변경 없음. 루트 `기획서.md`에 문제·범위·비목표·페르소나·여정/그룹 구분·보안 한계를 제품 언어로 정리. 기술 수용 기준은 `REQUIREMENTS.md`가 단일 기준. 메타프롬프트: `메타-프롬프트-기획서-역생성.md`.
+
 ## [2026-08-16] 제품명 다시하기
 - **D33**: 사용자("form-preset이 안 맞음… 브라우저 자동화에 가깝지 않나?" → 추천대로 진행). 표시 이름 **다시하기**, 패키지/저장소 **dasihagi**. 매크로·자동화라는 말은 쓰지 않음. 내보내기 `appId`는 `dasihagi`, 가져오기는 예전 `form-preset-extension`도 허용. 메타프롬프트: `메타-프롬프트-제품명-다시하기.md`.
 

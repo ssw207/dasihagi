@@ -7,7 +7,8 @@
     syncedCount: 0,
     lastRecordAt: 0,
     debounceTimer: null,
-    pending: null
+    pending: null,
+    listening: false
   };
   let styleEl = null;
   let panelEl = null;
@@ -391,6 +392,16 @@
   function showRecordChip() {
     if (recordChipEl) return;
     if (!shouldShowRecordChip()) return;
+    if (!document.body) {
+      document.addEventListener(
+        'DOMContentLoaded',
+        () => {
+          if (record.active) showRecordChip();
+        },
+        { once: true }
+      );
+      return;
+    }
     recordChipEl = document.createElement('div');
     recordChipEl.className = 'fp-record-chip';
     recordChipEl.innerHTML =
@@ -570,14 +581,37 @@
     recordEvent(el, type, value);
   }
 
+  function attachRecordListeners() {
+    if (record.listening) return;
+    record.listening = true;
+    document.addEventListener('input', onRecordInput, true);
+    document.addEventListener('change', onRecordChange, true);
+    document.addEventListener('click', onRecordClick, true);
+    document.addEventListener('keydown', onRecordKeydown, true);
+    window.addEventListener('pagehide', onRecordPageHide);
+  }
+
+  function detachRecordListeners() {
+    if (!record.listening) return;
+    record.listening = false;
+    document.removeEventListener('input', onRecordInput, true);
+    document.removeEventListener('change', onRecordChange, true);
+    document.removeEventListener('click', onRecordClick, true);
+    document.removeEventListener('keydown', onRecordKeydown, true);
+    window.removeEventListener('pagehide', onRecordPageHide);
+  }
+
   function startRecordingMode(presetId, opts) {
     opts = opts || {};
     if (record.active && (opts.resume || record.presetId === presetId)) {
       // 페이지 이동 후 재개 / 같은 프리셋 재시작: 버퍼를 리셋하지 않고 칩 숫자만 맞춘다
       if (typeof opts.eventCount === 'number') {
         record.syncedCount = opts.eventCount;
-        updateRecordChip();
       }
+      attachRecordListeners();
+      injectStyles();
+      showRecordChip();
+      updateRecordChip();
       return;
     }
     if (record.active) {
@@ -585,11 +619,7 @@
       record.pending = null;
       record.active = false;
       hideRecordChip();
-      document.removeEventListener('input', onRecordInput, true);
-      document.removeEventListener('change', onRecordChange, true);
-      document.removeEventListener('click', onRecordClick, true);
-      document.removeEventListener('keydown', onRecordKeydown, true);
-      window.removeEventListener('pagehide', onRecordPageHide);
+      detachRecordListeners();
     }
     record.active = true;
     record.presetId = presetId;
@@ -598,13 +628,9 @@
     record.lastRecordAt = 0;
     record.pending = null;
     injectStyles();
+    attachRecordListeners();
     showRecordChip();
     updateRecordChip();
-    document.addEventListener('input', onRecordInput, true);
-    document.addEventListener('change', onRecordChange, true);
-    document.addEventListener('click', onRecordClick, true);
-    document.addEventListener('keydown', onRecordKeydown, true);
-    window.addEventListener('pagehide', onRecordPageHide);
   }
 
   async function stopRecordingMode() {
@@ -613,15 +639,25 @@
     await flushPendingRecord();
     record.active = false;
     hideRecordChip();
-    document.removeEventListener('input', onRecordInput, true);
-    document.removeEventListener('change', onRecordChange, true);
-    document.removeEventListener('click', onRecordClick, true);
-    document.removeEventListener('keydown', onRecordKeydown, true);
-    window.removeEventListener('pagehide', onRecordPageHide);
+    detachRecordListeners();
     record.presetId = null;
     record.lastRecordAt = 0;
     record.events = [];
     record.syncedCount = 0;
+  }
+
+  function joinActiveRecording() {
+    try {
+      chrome.runtime.sendMessage({ type: 'RECORD_STATUS' }, (resp) => {
+        if (chrome.runtime.lastError) return;
+        const data = resp && resp.ok ? resp.data : null;
+        if (data && data.active && data.presetId) {
+          startRecordingMode(data.presetId, { resume: true, eventCount: data.eventCount || 0 });
+        }
+      });
+    } catch (e) {
+      // 확장 컨텍스트가 없으면 합류하지 않음
+    }
   }
 
   // ---------- 순차 재생 (녹화된 행동을 타이밍대로 재생) ----------
@@ -1026,4 +1062,11 @@
   };
   window.addEventListener('popstate', checkUrlChange);
   window.addEventListener('hashchange', checkUrlChange);
+
+  // 늦게 생긴 iframe / src가 바뀐 프레임은 RECORD_START를 못 받을 수 있음 → 활성 세션이면 스스로 합류
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', joinActiveRecording, { once: true });
+  } else {
+    setTimeout(joinActiveRecording, 0);
+  }
 })();

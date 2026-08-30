@@ -1119,7 +1119,7 @@ async function handleMessage(msg, sender) {
       return true;
     }
     case 'RECORD_STATUS': {
-      const tabId = msg.tabId;
+      const tabId = msg.tabId != null ? msg.tabId : sender.tab && sender.tab.id;
       const session = getRecordSession(tabId);
       if (!session) return { active: false, presetId: null, eventCount: 0 };
       return {
@@ -1343,6 +1343,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     handleStepTabLoaded(tabId);
   }
 });
+
+// 탭 URL이 안 바뀌고 iframe만 로드/교체되는 사내 어드민: tabs.onUpdated가 안 뜸
+if (chrome.webNavigation && chrome.webNavigation.onCompleted && typeof chrome.webNavigation.onCompleted.addListener === 'function') {
+  chrome.webNavigation.onCompleted.addListener((details) => {
+    if (!details || details.tabId == null) return;
+    const session = getRecordSession(details.tabId);
+    if (!session) return;
+    if (isRestrictedRecordUrl(details.url)) return;
+    if (details.frameId !== 0) {
+      rememberSessionSite(session, details.url);
+      persistRecordSessions();
+    }
+    resumeRecordingIfNeeded(details.tabId);
+  });
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   // 닫힌 탭을 캡처/녹화 추적에서 제거 (좀비 방지, Flow-9)

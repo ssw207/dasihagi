@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>늦은 iframe 호스트</title></head>
+<body>
+  <h1>껍데기만 먼저</h1>
+  <div id="slot"></div>
+  <script>
+    setTimeout(function () {
+      var f = document.createElement('iframe');
+      f.id = 'admin';
+      f.title = '어드민';
+      f.src = '/iframe-form';
+      f.style.cssText = 'width:100%;height:320px;border:1px solid #ccc';
+      document.getElementById('slot').appendChild(f);
+    }, 1200);
+  </script>
+</body>
+</html>

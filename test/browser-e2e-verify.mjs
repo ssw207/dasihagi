@@ -626,6 +626,129 @@ async function scenarioHIframe() {
   await popup2.close().catch(() => {});
 }
 
+async function scenarioHLateIframe() {
+  const hostUrl = `http://127.0.0.1:${PORT}/iframe-host-late`;
+  await formPage.goto(hostUrl);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, '늦은iframe');
+  await beginRecord(popup);
+  await formPage.waitForSelector('#admin', { timeout: 10000 });
+  const frame = formPage.frameLocator('#admin');
+  await frame.locator('#partner').waitFor({ state: 'visible', timeout: 10000 });
+  await frame.locator('.fp-record-chip').waitFor({ state: 'visible', timeout: 10000 });
+  await frame.locator('#partner').fill('지연제휴');
+  await sleep(450);
+  await frame.locator('#fee').fill('9.9');
+  await sleep(450);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('H3 지연 iframe 제휴사 값 기록', values.includes('지연제휴'), values.join(','));
+  ok('H3 지연 iframe 수수료 값 기록', values.includes('9.9'), values.join(','));
+  await popup.close().catch(() => {});
+}
+
+async function scenarioINestedIframe() {
+  await formPage.goto(`http://127.0.0.1:${PORT}/iframe-host-nested`);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, '중첩iframe');
+  await beginRecord(popup);
+  const inner = formPage.frameLocator('#shell').frameLocator('#admin');
+  await inner.locator('#partner').waitFor({ state: 'visible', timeout: 10000 });
+  await inner.locator('#partner').fill('중첩제휴');
+  await sleep(450);
+  await inner.locator('#fee').fill('1.1');
+  await sleep(450);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('I1 중첩 iframe 제휴사 기록', values.includes('중첩제휴'), values.join(','));
+  ok('I1 중첩 iframe 수수료 기록', values.includes('1.1'), values.join(','));
+  await popup.close().catch(() => {});
+}
+
+async function scenarioJIframeSrcSwap() {
+  await formPage.goto(`http://127.0.0.1:${PORT}/iframe-host-swap`);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, 'src교체');
+  await beginRecord(popup);
+  const frame = formPage.frameLocator('#admin');
+  await frame.locator('#partner').waitFor({ state: 'visible', timeout: 10000 });
+  await frame.locator('.fp-record-chip').waitFor({ state: 'visible', timeout: 10000 });
+  await frame.locator('#partner').fill('교체제휴');
+  await sleep(450);
+  await frame.locator('#fee').fill('2.2');
+  await sleep(450);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('J1 src 교체 후 제휴사 기록', values.includes('교체제휴'), values.join(','));
+  ok('J1 src 교체 후 수수료 기록', values.includes('2.2'), values.join(','));
+  await popup.close().catch(() => {});
+}
+
+async function scenarioKTinyIframe() {
+  await formPage.goto(`http://127.0.0.1:${PORT}/iframe-host-tiny`);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, '작은iframe');
+  await beginRecord(popup);
+  const inIframe = await formPage.frameLocator('#admin').locator('.fp-record-chip').count();
+  ok('K1 작은 iframe에는 칩 없음', inIframe === 0, String(inIframe));
+  const onHost = await formPage.locator('.fp-record-chip').count();
+  ok('K1 바깥 페이지에 칩 있음', onHost >= 1, String(onHost));
+  const frame = formPage.frameLocator('#admin');
+  await frame.locator('#partner').fill('작은제휴');
+  await sleep(450);
+  await frame.locator('#fee').fill('0.5');
+  await sleep(450);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('K2 작은 iframe 값도 기록', values.includes('작은제휴') && values.includes('0.5'), values.join(','));
+  await popup.close().catch(() => {});
+}
+
+async function scenarioLUnicode() {
+  await formPage.goto(FORM_URL);
+  await formPage.bringToFront();
+  const popup = await openPopup();
+  await createPreset(popup, '유니코드');
+  await beginRecord(popup);
+  await formPage.fill('[placeholder="이름"]', '한👍가');
+  await sleep(450);
+  await formPage.fill('[placeholder="메모"]', 'メモ✨');
+  await sleep(450);
+  await clickStopRecord();
+  const id = await latestPresetId();
+  const blob = await waitBlob(id, 2);
+  const values = (blob?.fields || []).map((f) => String(f.value || ''));
+  ok('L1 이모지 이름 기록', values.includes('한👍가'), values.join(','));
+  ok('L1 일본어 메모 기록', values.includes('メモ✨'), values.join(','));
+  await formPage.evaluate(() => document.querySelector('form')?.reset());
+  const popup2 = await openPopup();
+  await showAllPresets(popup2);
+  await clickCardAct(popup2, '유니코드', 'replay');
+  await formPage.waitForFunction(
+    () =>
+      document.querySelector('[placeholder="이름"]')?.value === '한👍가' &&
+      document.querySelector('[placeholder="메모"]')?.value === 'メモ✨',
+    { timeout: 15000 }
+  );
+  const name = await formPage.inputValue('[placeholder="이름"]');
+  const memo = await formPage.inputValue('[placeholder="메모"]');
+  ok('L2 재생 후 이모지', name === '한👍가', name);
+  ok('L2 재생 후 일본어', memo === 'メモ✨', memo);
+  await popup2.close().catch(() => {});
+}
+
 // ---------- 시나리오 E: 마이그레이션 ----------
 async function scenarioE() {
   const legacyPreset = {
@@ -690,6 +813,10 @@ async function main() {
     '/j/compare': 'journey-compare.html',
     '/j/product': 'journey-product.html',
     '/iframe-host': 'iframe-host.html',
+    '/iframe-host-late': 'iframe-host-late.html',
+    '/iframe-host-nested': 'iframe-host-nested.html',
+    '/iframe-host-swap': 'iframe-host-swap.html',
+    '/iframe-host-tiny': 'iframe-host-tiny.html',
     '/iframe-form': 'iframe-form.html'
   };
   const server = http.createServer(async (req, res) => {
@@ -751,6 +878,11 @@ async function main() {
     await runScenario('F: 멀티페이지 여정', scenarioF);
     await runScenario('G: 입력 팝업 확인 닫힘', scenarioGModalPopup);
     await runScenario('H: iframe 어드민', scenarioHIframe);
+    await runScenario('H3: 지연 iframe 녹화', scenarioHLateIframe);
+    await runScenario('I: 중첩 iframe', scenarioINestedIframe);
+    await runScenario('J: iframe src 교체', scenarioJIframeSrcSwap);
+    await runScenario('K: 작은 iframe', scenarioKTinyIframe);
+    await runScenario('L: 유니코드 값', scenarioLUnicode);
     await runScenario('E: 레거시 마이그레이션', scenarioE);
   } finally {
     await context.close().catch(() => {});

@@ -448,6 +448,13 @@ globalThis.chrome = {
       }
     },
     sendMessage(msg, cb) {
+      if (typeof backgroundListener !== 'function') {
+        const err = { message: 'background not ready' };
+        chrome.runtime.lastError = err;
+        if (cb) cb();
+        chrome.runtime.lastError = undefined;
+        return;
+      }
       callBackground(msg).then((resp) => cb && cb(resp));
     },
     lastError: undefined
@@ -504,6 +511,14 @@ globalThis.chrome = {
   action: {
     setBadgeText() {},
     setBadgeBackgroundColor() {}
+  },
+  webNavigation: {
+    async getAllFrames() {
+      return [{ frameId: 0 }];
+    },
+    onCompleted: {
+      addListener() {}
+    }
   }
 };
 
@@ -616,6 +631,8 @@ check('RECORD_START ok', !!recStart.ok, true);
 const recOn = await callBackground({ type: 'RECORD_STATUS', tabId: 1 });
 check('녹화 중 RECORD_STATUS active', !!(recOn.ok && recOn.data && recOn.data.active), true);
 check('녹화 중 presetId 일치', recOn.data && recOn.data.presetId, presetId);
+const recOnNoTab = await callBackground({ type: 'RECORD_STATUS' });
+check('RECORD_STATUS tabId 생략 시 sender.tab 사용', !!(recOnNoTab.ok && recOnNoTab.data && recOnNoTab.data.active), true);
 
 // 5-3. 이름 입력 (첫 이벤트, delay 0)
 nameInput._value = '홍길동';

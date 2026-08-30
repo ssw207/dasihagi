@@ -4,9 +4,9 @@
 >
 > **최신화 규칙**: 기능이 추가되거나 변경되면 반드시 이 문서를 갱신한다 (기능 요약, 데이터 모델, 메시지, 결정 사항). 갱신 주체는 해당 기능을 머지한 라운드.
 >
-> **관련 문서**: `.sisyphus/notepads/form-preset-extension/decisions.md`(결정 D1~), `.sisyphus/plans/*.md`(라운드 계획), `README.md`(사용자 매뉴얼), `메타프롬프트/`(작업 메타프롬프트)
+> **관련 문서**: [`기획서.md`](기획서.md)(제품 범위·비목표, 역생성), `.sisyphus/notepads/form-preset-extension/decisions.md`(결정 D1~), `.sisyphus/plans/*.md`(라운드 계획), `README.md`(사용자 매뉴얼), `유즈케이스-실사용자.md`, `메타프롬프트/`(작업 메타프롬프트)
 >
-> **최종 갱신**: 2026-08-16 (D33 제품명 다시하기)
+> **최종 갱신**: 2026-08-30 (D36 QA 엣지케이스 스위트)
 
 ---
 
@@ -99,7 +99,8 @@
 |----|----------|-----------|
 | R8-1 | `test/encryption-verify.mjs`: mock chrome으로 실제 background.js 구동, 프리셋 blob 암호화 S1~S11 + 레거시 마이그레이션 M1~M2 검증 | `npm run test:encrypt` 전부 PASS |
 | R8-2 | `test/record-replay-verify.mjs`: mock DOM+chrome으로 녹화→저장→재생 통합 검증 (전체 암호화 + sensitive 마스킹 신호 보존) | `npm run test:replay` 전부 PASS |
-| R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html + journey-*.html) + SW `chrome.storage.local` 직접 검증. A 기본, B 녹화 엣지, C PII, D 재생, E 레거시 마이그레이션, **F 멀티페이지 여정**, **G 입력 팝업 열기→입력→확인 닫힘→재생** | `npm run test:e2e` **58/58 PASS** |
+| R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html + journey-*.html) + SW `chrome.storage.local` 직접 검증. A~H + **I 중첩 iframe / J src 교체 / K 작은 iframe / L 유니코드** | `npm run test:e2e` **71/71 PASS** |
+| R8-4 | `test/qa-edge-verify.mjs`: 메시지 sender, import 거부, chrome:// 녹화, 패턴(포트/IPv6/`*`), 그룹 빈 실행, 손상 blob | `npm run test:qa` **22/22 PASS** |
 
 ### R9. 녹화/재생 방식 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -185,6 +186,7 @@
 | R18-2 | 녹화/캡처/적용/제출 메시지를 탭의 모든 프레임에 전달 | webNavigation.getAllFrames |
 | R18-3 | APPLY_ACTION은 성공한 첫 프레임, APPLY_PRESET은 프레임 결과 병합 | sendApplyToFrames |
 | R18-4 | 녹화 칩은 top 또는 충분히 큰 iframe만 | 작은 광고 iframe에 칩 난립 방지 |
+| R18-5 | 늦게 생긴 iframe / src가 바뀐 프레임도 활성 녹화 세션에 합류 | content `RECORD_STATUS` 합류 + `webNavigation.onCompleted` 재개. iframe URL은 탭 navigate로 기록하지 않음 |
 
 ### R10. 개인정보 자동 감지 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -306,6 +308,8 @@
 - [x] `npm run test:encrypt` 13/13 PASS (blob 암호화 S1~S11 + 마이그레이션 M1~M2)
 - [x] `npm run test:pii` 30/30 PASS (PII 감지 판정)
 - [x] `npm run test:replay` PASS (녹화→저장→재생 통합 + 이중 RECORD_START 가드)
+- [x] `npm run test:qa` 22/22 PASS
+- [x] `npm run test:e2e` 71/71 PASS
 - [x] 변경 파일이 요구사항 ID(R1~R14)에 대응 — 어느 요구사항도 건드리지 않는 변경은 의심
 
 ### 기능별
@@ -326,7 +330,7 @@
 - [x] R15: 이 사이트 녹화 / 녹화 배너 / 카드 ⋯ 메뉴 / 현재 사이트만 필터
 - [x] R16: 녹화 중 opener 팝업/새 탭 이어 녹화
 - [x] R17: 재생 속도(이동 후 대기) fast/normal/slow
-- [x] R18: iframe 안 폼 녹화/재생
+- [x] R18: iframe 안 폼 녹화/재생 (지연 로드 합류 포함)
 
 ## 7. 확정 결정 사항 요약 (decisions.md 상세)
 
@@ -364,7 +368,10 @@
 | D30 | 녹화 중 A가 연 B 팝업/새 탭은 같은 세션으로 이어 녹화. sessionId로 탭을 묶고 RECORD_STOP은 묶인 탭을 함께 종료. |
 | D31 | 재생 속도 전역 설정. 사내(봇 제한 없음)는 빠름, 외부는 보통/느림. 도메인 하드코딩 없음. |
 | D32 | iframe 지원: all_frames + 전 프레임 메시지. 상위 페이지에서 cross-origin DOM을 읽지 않음. |
+| D35 | 늦게 로드/교체되는 iframe도 녹화 합류. RECORD_STATUS는 sender.tab, content 부트 합류, webNavigation.onCompleted. iframe URL은 탭 navigate로 안 남김. |
+| D36 | QA 엣지케이스 카탈로그(`QA-엣지케이스.md`) + `npm run test:qa` + E2E I/J/K/L. |
 | D33 | 제품명 다시하기 / 저장소 dasihagi. 내보내기 appId 변경, 레거시 form-preset-extension 가져오기 허용. |
+| D34 | 구현된 제품 기준 기획서 역생성 (`기획서.md`). 코드 변경 없음. |
 
 ## 8. 보류/미구현 항목
 
@@ -372,7 +379,7 @@
 |------|------|------|
 | options_page (전용 설정 페이지) | 보류 확정 | popup 프리셋 관리와 기능 중복 (D10/D14) |
 | `프리셋-정보-관리` 브랜치 병합 | 보류 | 별도 구현체, 가치 기능 전부 흡수 완료 (D8/D12), 참조용 보관 |
-| 브라우저 E2E 테스트 (Playwright) | ✅ 해소 (R8-3, D22) | `npm run test:e2e` 58/58 PASS (A~H, iframe 어드민 포함, 2026-08-16) |
+| 브라우저 E2E 테스트 (Playwright) | ✅ 해소 (R8-3, D22, D35, D36) | `npm run test:e2e` 71/71 PASS (I 중첩·J src교체·K 작은 iframe·L 유니코드 포함) |
 | 멀티페이지 사용자 여정 녹화/재생 (한 프리셋, 클릭·검색·페이지 이동) | ✅ 해소 (R11, D20) | recordSessions + 클릭/Enter/이동 녹화 + 같은 탭 재생. 동적 사이트의 셀렉터 불안정은 제품 한계로 README에 명시. |
 
 ## 9. 변경 이력
@@ -400,3 +407,6 @@
 | 2026-08-16 | D33 | 제품명 다시하기(dasihagi). 메타프롬프트 `메타-프롬프트-제품명-다시하기.md`. | — |
 | 2026-08-16 | docs | README 목차·설치·여정/그룹 표 정리. 움짤은 `npm run gif`로 다시 촬영. | — |
 | 2026-08-16 | docs | 메타프롬프트를 `메타프롬프트/` 한 폴더로 모음. | — |
+| 2026-08-30 | D34 | 제품 기획서 역생성 (`기획서.md`). 기능 변경 없음. 메타프롬프트 `메타-프롬프트-기획서-역생성.md`. | — |
+| 2026-08-30 | D35 | 늦게 생긴 iframe이 녹화 세션에 합류 (R18-5). 메타프롬프트 `메타-프롬프트-iframe-녹화-검토.md`. | — |
+| 2026-08-30 | D36 | QA 엣지케이스 도출·실행 (`QA-엣지케이스.md`, `test:qa`, e2e I~L). 메타프롬프트 `메타-프롬프트-QA-엣지케이스-진행.md`. | — |
