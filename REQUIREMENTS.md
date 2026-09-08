@@ -4,9 +4,9 @@
 >
 > **최신화 규칙**: 기능이 추가되거나 변경되면 반드시 이 문서를 갱신한다 (기능 요약, 데이터 모델, 메시지, 결정 사항). 갱신 주체는 해당 기능을 머지한 라운드.
 >
-> **관련 문서**: [`기획서.md`](기획서.md)(제품 범위·비목표, 역생성), `.sisyphus/notepads/form-preset-extension/decisions.md`(결정 D1~), `.sisyphus/plans/*.md`(라운드 계획), `README.md`(사용자 매뉴얼), `유즈케이스-실사용자.md`, `메타프롬프트/`(작업 메타프롬프트)
+> **관련 문서**: [`기획서.md`](기획서.md)(제품 범위·비목표, 역생성), [`docs/기안-사내테스트-다시하기.md`](docs/기안-사내테스트-다시하기.md)(사내 테스트 한정 기안, D37 작성 · D38 승인), `.sisyphus/notepads/form-preset-extension/decisions.md`(결정 D1~), `.sisyphus/plans/*.md`(라운드 계획), `README.md`(사용자 매뉴얼), `유즈케이스-실사용자.md`, `메타프롬프트/`(작업 메타프롬프트)
 >
-> **최종 갱신**: 2026-08-30 (D36 QA 엣지케이스 스위트)
+> **최종 갱신**: 2026-09-05 (D43~D48 채움 초안 CAP-1~7 전체, R19~R24)
 
 ---
 
@@ -49,7 +49,7 @@
 | R3-1 | 저장된 프리셋을 버튼 한 번으로 폼에 채움 | popup "적용" 버튼 |
 | R3-2 | React/Vue 등 SPA 이벤트 호환: 네이티브 value setter + `input`/`change` 이벤트 dispatch | `Object.getOwnPropertyDescriptor` |
 | R3-3 | 타입별 값 세팅 (select option 없으면 추가, checkbox/radio checked) | 타입별 규칙 준수 |
-| R3-4 | SPA 지연 렌더링 대응: MutationObserver 재시도 (최대 N회) | 지연 요소에도 적용 |
+| R3-4 | SPA 지연 렌더링 대응: MutationObserver + 300ms 디바운스, 최대 15초 | `content.js` applyPreset 재시도 |
 | R3-5 | 적용 전 사이트 패턴 검증 (대상 사이트가 아니면 오류) | APPLY_PRESET에서 검증 |
 
 ### R4. 그룹 실행 (여러 페이지 복합 세팅) — ✅ 구현
@@ -66,9 +66,9 @@
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
 | R5-1 | 프리셋+그룹을 JSON 파일로 내보내기 (민감 필드는 복호화된 값 포함 — 사용자 소유 백업) | EXPORT_DATA |
-| R5-2 | JSON 파일 가져오기: 스키마 검증(버전/형식), 새 ID 부여, 민감 필드는 새 ID 기준 재암호화 | IMPORT_DATA |
+| R5-2 | JSON 파일 가져오기: 스키마 검증(정수 schemaVersion, appId `dasihagi` 또는 레거시 `form-preset-extension`), 새 ID 부여, 민감 필드는 새 ID 기준 재암호화 | IMPORT_DATA |
 | R5-3 | 가져오기 시 기존 항목 유지 + 새 항목 추가 (덮어쓰기 없음) | concat 방식 |
-| R5-4 | 제한: 프리셋 500개 / 그룹 100개 / 파일 5MB | 상수 + popup 검증 |
+| R5-4 | 제한: 프리셋 500개 / 그룹 100개 / 파일 5MB. 프리셋당 필드 500개 초과 또는 필드 값 64KB 초과는 해당 프리셋만 제외 | `MAX_IMPORT_*` / `MAX_FIELDS_PER_PRESET` / `MAX_FIELD_VALUE_LENGTH` |
 
 ### R6. 프리셋 전체 암호화 저장 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -89,7 +89,7 @@
 | R7-1 | 프리셋 목록 카드에 필드 값 행 표시 + 복사 버튼 | 📋 클릭 → 클립보드 복사 |
 | R7-2 | 민감 필드는 `••••••` 마스킹 표시, 복사 시 실제 값 | password manager 패턴 |
 | R7-3 | boolean 필드는 `체크됨/체크 안 됨` 표시, 복사 값은 `true/false` | 필드 타입 처리 |
-| R7-4 | 빈 값은 `(값 없음)` + 복사 버튼 비활성 | value === '' |
+| R7-4 | 빈 값은 `(값 없음)` + 복사 버튼 비활성. 손댈 칸은 `나중에 입력` (빈 값이면 복사 비활성 유지) | value === '' / handEdit |
 | R7-5 | 필드 5개 초과 시 `+N개 더보기` 토글 | 목록 접기/펼치기 |
 | R7-6 | 편집 뷰 필드 행에도 복사 버튼 (편집 중 최신 값 복사) | renderFields |
 | R7-7 | 복사는 clipboard API + `execCommand('copy')` 폴백, 성공/실패 토스트 | copyToClipboard |
@@ -98,7 +98,7 @@
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
 | R8-1 | `test/encryption-verify.mjs`: mock chrome으로 실제 background.js 구동, 프리셋 blob 암호화 S1~S11 + 레거시 마이그레이션 M1~M2 검증 | `npm run test:encrypt` 전부 PASS |
-| R8-2 | `test/record-replay-verify.mjs`: mock DOM+chrome으로 녹화→저장→재생 통합 검증 (전체 암호화 + sensitive 마스킹 신호 보존) | `npm run test:replay` 전부 PASS |
+| R8-2 | `test/record-replay-verify.mjs`: mock DOM+chrome으로 녹화→저장→재생 통합 검증 (전체 암호화 + sensitive 마스킹 신호 보존, 여정/다중사이트/팝업이어짐/모달/재생속도/손댈 칸) | `npm run test:replay` **141/141 PASS** |
 | R8-3 | `test/browser-e2e-verify.mjs`: **실제 Chromium에 dist 확장 로드(headful)** + localhost 서버(test-form.html + journey-*.html) + SW `chrome.storage.local` 직접 검증. A~H + **I 중첩 iframe / J src 교체 / K 작은 iframe / L 유니코드** | `npm run test:e2e` **71/71 PASS** |
 | R8-4 | `test/qa-edge-verify.mjs`: 메시지 sender, import 거부, chrome:// 녹화, 패턴(포트/IPv6/`*`), 그룹 빈 실행, 손상 blob | `npm run test:qa` **22/22 PASS** |
 
@@ -124,6 +124,7 @@
 | R11-7 | 여정 프리셋은 자동 적용하지 않음 | applyAutoPreset / AUTO_APPLY_CHECK 스킵 |
 | R11-8 | 기존 폼 전용 녹화/재생·캡처·그룹·암호화 하위 호환 | isJourneyPreset가 아니면 기존 경로 |
 | R11-9 | 사이트 전용 셀렉터/URL 하드코딩 금지 | 일반 셀렉터 + 텍스트 폴백 |
+| R11-10 | 같은 페이지 입력 레이어: 열기 클릭 → 입력 → 확인 클릭(레이어 닫힘)을 시간 순으로 기록·재생 | e2e G, `test:replay` 모달 |
 
 ### R12. 녹화 중 방문 사이트 N개 자동 허용 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -173,10 +174,10 @@
 ### R17. 재생 속도 (페이지 이동 후 대기) — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
 |----|----------|-----------|
-| R17-1 | 전역 설정 `ui:replayPace`: `fast` / `normal`(기본) / `slow` | SETTINGS_GET/SET |
-| R17-2 | 빠름: 녹화 delay를 짧게 자르고 이동 후 추가 대기 없음 (사내·봇제한 없음) | paceDelayMs ≤40, afterNav 0 |
-| R17-3 | 보통: 녹화 delay 그대로 + 이동 후 200ms | 기존에 가깝게 |
-| R17-4 | 느림: delay 배율 + 이동 후 1초 | 외부 사이트 |
+| R17-1 | 전역 설정 `ui:replayPace`: `fast` / `normal`(기본) / `slow`. 그 외 값은 `normal` | SETTINGS_GET/SET |
+| R17-2 | 빠름: delay ≤40ms, 이동 후 추가 대기 0, 탭 complete 8초, 요소 대기 2.5초 | `paceDelayMs` / `paceAfterNavigateMs` / `paceTabWaitMs` / `paceWaitElementMs` |
+| R17-3 | 보통: 녹화 delay 그대로 + 이동 후 200ms, 탭 15초, 요소 5초 | 기본값 |
+| R17-4 | 느림: delay×1.5+200(상한 5000) + 이동 후 1초, 탭 20초, 요소 8초 | 외부 사이트 |
 | R17-5 | popup에 **재생 속도** 세그먼트. 사이트 목록 하드코딩 없음 | 사용자가 고름 |
 
 ### R18. iframe 안 폼 — ✅ 구현
@@ -185,8 +186,63 @@
 | R18-1 | content script `all_frames: true` | iframe 안 input도 리스너 |
 | R18-2 | 녹화/캡처/적용/제출 메시지를 탭의 모든 프레임에 전달 | webNavigation.getAllFrames |
 | R18-3 | APPLY_ACTION은 성공한 첫 프레임, APPLY_PRESET은 프레임 결과 병합 | sendApplyToFrames |
-| R18-4 | 녹화 칩은 top 또는 충분히 큰 iframe만 | 작은 광고 iframe에 칩 난립 방지 |
+| R18-4 | 녹화 칩은 top 또는 iframe `innerWidth≥240 && innerHeight≥160`만 | 작은 광고 iframe에 칩 난립 방지 |
 | R18-5 | 늦게 생긴 iframe / src가 바뀐 프레임도 활성 녹화 세션에 합류 | content `RECORD_STATUS` 합류 + `webNavigation.onCompleted` 재개. iframe URL은 탭 navigate로 기록하지 않음 |
+
+### R19. 손댈 칸 / 나중에 입력 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R19-1 | 채움 타입(`text` `textarea` `select` `checkbox` `radio`)의 저장 값이 비면 손댈 칸. 재생은 값을 넣지 않고 노란 `fp-hand-edit`를 input/change까지 유지 | 녹화 중 별도 버튼 없음. 칸을 비워 두면 손댈 칸 |
+| R19-2 | 편집에서 손댈 칸을 켜고 끌 수 있다. 값이 있는 칸을 켜면 재생이 덮지 않고 노란 표시만 | popup `data-hand-edit` |
+| R19-3 | `click` `keydown` `navigate`는 손댈 칸이 아니다 | isFillFieldType |
+| R19-4 | 누락은 손댈 칸이 아닌 필드가 없거나 적용 실패한 경우, 또는 손댈 칸 요소를 못 찾은 경우. 손댈 칸 성공은 실패 개수에 넣지 않음 | 토스트: 채움 / 손댈 칸 / 누락 |
+| R19-5 | 플래그 `handEdit`는 암호화 blob 안에만. 평문 인덱스에 필드 값·플래그 없음 | R6 |
+| R19-6 | 레거시: `handEdit` 키 없음 + 채움 타입 + 값 `''` → 읽기 때 손댈 칸. 저장 전까지 blob 일괄 재기록 없음 | getPresetById |
+| R19-7 | 목록 카드 손댈 칸 빈 값: `나중에 입력` (`값 없음` 아님). 복사 버튼은 빈 값이면 비활성 | buildFieldCopyRows |
+| R19-8 | 화면 밖 손댈 칸은 자동 스크롤하지 않고 토스트 라벨로 존재를 알린다 | formatReplayToast |
+
+### R20. 위험 클릭 재생 금지 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R20-1 | 기본 위험 글자는 `marking-rules.md` 목록과 같거나 그 단어로 끝날 때(대소문자 무시). 목록: `상신` `결재` `결제` `결제하기` `구매하기` `전송` `송금` `이체` `Pay` `Purchase` | `matchesDangerText` |
+| R20-2 | `제출` `확인` `저장` `다음` `검색`은 기본 금지 아님 | 검색·임시저장 오차단 방지 |
+| R20-3 | 판정은 `replayBlocked:boolean`(클릭 타입만). 저장·읽기 시 `replayBlocked`가 boolean이면 그 값, 없으면 보이는 글자로 기본값 | `resolveReplayBlocked` / `getPresetById` / `normalizeRecordEvent` / `CAPTURE_SAVE_FIELD` |
+| R20-4 | 재생은 위험 클릭을 누르지 않고 `blocked:true`로 중단. 이후 필드는 멈춤. 토스트 `직접 누르기 N개` | `content.js applyField` `fp-blocked-click`, `replaySequential` `replayJourney` break, `formatReplayToast` |
+| R20-5 | 편집에서 클릭 필드 `재생 금지`를 켜고 끌 수 있다. 켜면 재생이 누르지 않음, 끄면 누름 | `popup data-replay-blocked` |
+| R20-6 | 그룹 `auto` 제출 버튼이 위험 글자면 자동 클릭하지 않고 `waiting`으로 사람 대기 | `handleStepTabLoaded` `SUBMIT_FORM blocked` |
+| R20-7 | `replayBlocked`는 blob 안만. 평문 인덱스에 없음. 레거시는 키 없음 → 기본값, 저장 전까지 blob 일괄 재기록 없음 | R6 |
+
+### R21. 파일 첨부 칸에서 멈춤 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R21-1 | `input[type=file]` 값은 확장이 채우지 못한다. 도달하면 값을 넣지 않고 `직접 첨부` 안내 | `content.js applyField` `fp-file-stop` `fileStop:true` |
+| R21-2 | 파일 칸은 실패가 아니라 `applied fileStop`으로 집계. 이후 필드는 이어서 진행 가능 | `replaySequential` / `formatReplayToast` |
+| R21-3 | 여정·그룹 모두 동일 | - |
+| R21-4 | 토스트 `직접 첨부 N개`, 스타일 `.fp-file-stop` | `popup/popup.js` |
+
+### R22. 프리셋별 재생 속도 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R22-1 | 프리셋에 `replayPace: 'fast'|'normal'|'slow'|''` (빈 값·키 없음이면 전역 따름) | `popup #ed-pace-row` `전역 따름` 버튼 |
+| R22-2 | 프리셋 값이 있으면 전역 `ui:replayPace`를 덮는다. 없으면 전역을 따름 | `resolvePresetPace(preset, globalPace)` |
+| R22-3 | 전역 `ui:replayPace`는 유지. 사이트 도메인 하드코딩 없음 | `SETTINGS_GET/SET` + 기획서 7.2 P0 |
+| R22-4 | 재생 타이밍은 preset pace 기준으로 delay/이동 후 대기/요소 대기 | `paceDelayMs` / `paceAfterNavigateMs` / `paceWaitElementMs` + `paceTabWaitMs` |
+
+### R23. 깨진 칸만 다시 찍기 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R23-1 | 편집에서 필드 `다시 찍기` → 페이지에서 칸을 가리키면 그 필드만 갱신 (전체 재녹화 없음) | `CAPTURE_START {replaceFieldId}` → `CAPTURE_SAVE_FIELD` → `findIndex(f.id===replaceId)` |
+| R23-2 | 캡처와 같은 종류의 동작으로 필드 지정. 별 엔진 없음 | `content startCaptureMode` `replaceFieldId` |
+| R23-3 | 갱신은 `id` 유지, `selector`·`value`만 갱신. 인덱스 작성부는 건드리지 않음 | `background CAPTURE_SAVE_FIELD` 머지 |
+| R23-4 | 여정 중간 실패 후 그 칸만 리픽하면 재녹화 없이 재생 | `fieldId` 누락 → 리픽 → `failures 0` |
+
+### R24. 값 없는 스크럽 내보내기 — ✅ 구현
+| ID | 요구사항 | 수용 기준 |
+|----|----------|-----------|
+| R24-1 | `EXPORT_DATA {scrub:true}`는 `fields[].value=''`인 사본. 손댈 칸·금지 클릭·속도 표시는 남김 | `scrubPresetForExport` |
+| R24-2 | 프리셋과 그룹을 함께 내보냄. 그룹엔 필드 값이 없음 | `EXPORT_DATA` |
+| R24-3 | 기존 실값 내보내기 경로는 유지. 스크럽은 별 동작·별 파일명(`presets-scrub-*.json`) | `popup downloadExport(scrub)` |
+| R24-4 | 스크럽 JSON 가져오기는 새 ID, 기존 항목 유지. 스키마·상한 R5 유지. 실값과 혼합 가져오기 충돌 없음 | `IMPORT_DATA` |
 
 ### R10. 개인정보 자동 감지 — ✅ 구현
 | ID | 요구사항 | 수용 기준 |
@@ -206,7 +262,7 @@
 | ID | 요구사항 | 비고 |
 |----|----------|------|
 | NFR-1 | Manifest V3 준수 (service_worker, content_scripts `<all_urls>` `all_frames`, permissions: storage/tabs/scripting/webNavigation) | manifest.json |
-| NFR-2 | 네이티브 JS만 사용, 번들러/의존성 추가 금지 | devDependencies: playwright만 |
+| NFR-2 | 네이티브 JS만 사용, 번들러/런타임 의존성 추가 금지 | 개발: playwright(E2E), ffmpeg-static(README GIF) |
 | NFR-3 | 모든 UI 문자열 한국어 | popup/content 패널/options |
 | NFR-4 | 배포 산출물: `npm run build` → `dist/` (manifest/background/content/secure-store + popup/icons) | scripts/build.js |
 | NFR-5 | 문법 검사: `npm run check` (node --check 전체 + manifest JSON 파싱) | package.json |
@@ -240,6 +296,8 @@
       type: "text" | "select" | "checkbox" | "radio" | "textarea" | "click" | "keydown" | "navigate",
       sensitive: false,                 // 마스킹 표시 신호 (저장 보호와 무관 — 전체가 암호화됨)
       delay: 0,                         // 녹화 전용. 직전 행동 후 경과 ms (0~5000), 기존 필드엔 없음
+      handEdit: false,                  // 손댈 칸 (R19). 채움 타입만. 키 없음+값 ''이면 읽기 때 true
+      replayBlocked: false,             // 재생 금지 클릭 (R20). click 타입만. 키 없음이면 보이는 글자로 기본값
       // type 확장(R11): "click" | "keydown" | "navigate"
       // click: selector + value(보이는 글자, 재생 폴백)
       // keydown: selector + value("Enter")
@@ -247,6 +305,7 @@
     }
   ],
   startUrl: "",                         // 여정 녹화 시작 탭 URL (선택, R11)
+  replayPace: "fast"|"normal"|"slow"|"", // 프리셋별 재생 속도 (R22). ''·키 없음이면 전역 따름
   autoApply: false,
   createdAt: 0,
   updatedAt: 0,
@@ -272,11 +331,28 @@
 { runId, groupId, groupName, stepIdx, totalSteps, status: "running"|"waiting"|"done"|"failed"|"aborted",
   stepResults, currentTabId, currentStep, error }
 
+// key: "recordSessions" — chrome.storage.session (녹화 버퍼. SW 재시작 생존)
+{
+  v: 2,
+  tabs: { [tabId]: sessionId },
+  sessions: {
+    [sessionId]: {
+      sessionId, presetId, events: [], lastRecordAt: 0,
+      startUrl: "", lastUrl: "", allowedSites: []
+    }
+  }
+}
+
 // key: "sec:preset:<id>" — 암호문 (AES-256-GCM, 프리셋 전체 JSON)
 { ct: "base64", iv: "base64" }
 
 // key: "vault_key_v1" — AES 키 (자동 생성, base64 raw)
+
+// key: "ui:replayPace" — chrome.storage.local, "fast"|"normal"|"slow" (기본 "normal")
+// key: "ui:filterCurrentSite" — chrome.storage.local, boolean (기본 true)
 ```
+
+상한 상수 (`background.js`): 가져오기 프리셋 500 / 그룹 100 / 5MB, 프리셋당 필드 500, 필드 값 64KB, `urlPatterns` 20, `delay` 0~5000.
 
 ## 5. 메시지 프로토콜 (content ↔ background ↔ popup)
 
@@ -288,12 +364,12 @@
 | CAPTURE_START / STOP / STATUS | popup→background→content | 캡처 모드 토글/조회 |
 | CAPTURE_SAVE_FIELD | content→background | 캡처된 필드 저장 (프리셋 blob 갱신) |
 | RECORD_START / STOP / SAVE | popup/content↔background | 녹화 모드 토글 + 녹화 저장 (전체 프리셋 암호화, sensitive 신호 보존) |
-| RECORD_STATUS | popup↔background | 현재 탭 녹화 여부·presetId·eventCount |
+| RECORD_STATUS | popup/content↔background | 현재 탭 녹화 여부·presetId·eventCount. `tabId` 없으면 `sender.tab.id` |
 | RECORD_APPEND | content→background | 확정된 행동 1건을 세션 버퍼에 추가 (페이지 이동 생존) |
 | APPLY_ACTION | background→content | 여정 재생 중 한 행동(값/클릭/Enter) 적용 |
 | APPLY_PRESET | popup/background→content | 프리셋 적용 (여정이면 background 같은 탭 재생, 아니면 content) |
 | AUTO_APPLY_CHECK | content→background | 자동 적용 매칭 조회 |
-| GET_CURRENT_URL | popup→background | 현재 탭 URL |
+| GET_CURRENT_URL | background 핸들러 유지 | popup은 `chrome.tabs.query` 직접 사용 |
 | EXPORT_DATA / IMPORT_DATA | popup→background | 백업/복원 (민감 복호화/재암호화) |
 | SUBMIT_FORM | background→content | 그룹 auto 제출 |
 | SETTINGS_GET / SETTINGS_SET | popup↔background | 재생 속도(`replayPace`: fast/normal/slow) |
@@ -307,10 +383,10 @@
 - [x] `npm run build` exit 0, dist가 저장소와 일치 (빌드 후 git status 깨끗)
 - [x] `npm run test:encrypt` 13/13 PASS (blob 암호화 S1~S11 + 마이그레이션 M1~M2)
 - [x] `npm run test:pii` 30/30 PASS (PII 감지 판정)
-- [x] `npm run test:replay` PASS (녹화→저장→재생 통합 + 이중 RECORD_START 가드)
+- [x] `npm run test:replay` 161/161 PASS (녹화→저장→재생 통합 + 여정/다중사이트/팝업이어짐/모달/재생속도/손댈 칸/위험 클릭·파일·프리셋 속도·리픽·스크럽)
 - [x] `npm run test:qa` 22/22 PASS
 - [x] `npm run test:e2e` 71/71 PASS
-- [x] 변경 파일이 요구사항 ID(R1~R14)에 대응 — 어느 요구사항도 건드리지 않는 변경은 의심
+- [x] 변경 파일이 요구사항 ID(R1~R19,R20~R24)에 대응 — 어느 요구사항도 건드리지 않는 변경은 의심
 
 ### 기능별
 - [x] R1: 프리셋 CRUD + 패턴 매칭 + autoApply 동작
@@ -323,7 +399,7 @@
 - [x] R8: 암호화·녹화재생 통합 검증 스크립트 유지
 - [x] R9: 녹화 → 세팅 → 종료 → 재생 순서/타이밍 재생 + 기존 프리셋 하위 호환
 - [x] R10: PII 자동 감지 (메타데이터/값 정규식/오탐 방지) + 마스킹 신호 보존
-- [x] R11: 여정 녹화(이동 후 재개/클릭/Enter/navigate) + 같은 탭 재생 + 폼 전용 하위 호환
+- [x] R11: 여정 녹화(이동 후 재개/클릭/Enter/navigate/같은 페이지 모달) + 같은 탭 재생 + 폼 전용 하위 호환
 - [x] R12: 녹화 중 방문 사이트 N개 자동 허용 + 레거시 urlPattern 하위 호환
 - [x] R13: 편집에서 필드 표시 이름 수정 + 공백 시 `필드`
 - [x] R14: 프리셋 여러 개 선택 삭제 + 그룹 스텝 정리
@@ -331,6 +407,12 @@
 - [x] R16: 녹화 중 opener 팝업/새 탭 이어 녹화
 - [x] R17: 재생 속도(이동 후 대기) fast/normal/slow
 - [x] R18: iframe 안 폼 녹화/재생 (지연 로드 합류 포함)
+- [x] R19: 손댈 칸(나중에 입력) 녹화·편집·재생 하이라이트, 누락과 구분
+- [x] R20: 위험 클릭 재생 금지(보이는 글자 매칭, 편집 금지, 그룹 auto 대기) — CAP-4
+- [x] R21: 파일 첨부 칸에서 멈춤·직접 첨부 안내 — CAP-6
+- [x] R22: 프리셋별 재생 속도(프리셋이 전역 덮음) — CAP-5
+- [x] R23: 깨진 칸만 다시 찍기(캡처 재사용, selector 갱신) — CAP-3
+- [x] R24: 값 없는 스크럽 내보내기(프리셋+그룹, 값만 비움) — CAP-7
 
 ## 7. 확정 결정 사항 요약 (decisions.md 상세)
 
@@ -372,6 +454,18 @@
 | D36 | QA 엣지케이스 카탈로그(`QA-엣지케이스.md`) + `npm run test:qa` + E2E I/J/K/L. |
 | D33 | 제품명 다시하기 / 저장소 dasihagi. 내보내기 appId 변경, 레거시 form-preset-extension 가져오기 허용. |
 | D34 | 구현된 제품 기준 기획서 역생성 (`기획서.md`). 코드 변경 없음. |
+| D37 | 사내 테스트 한정 개발 기안. 기획팅 + `docs/기안-사내테스트-다시하기.md`. 제품 기획서와 역할 분리. 코드 변경 없음. |
+| D38 | 기안 승인. §11 네 항목·K1~K9. 범위 확대 없음. 코드 변경 없음. |
+| D39 | 소스 기준 문서 최신화. 런타임 코드 변경 없음. 테스트 수·저장 키·R11-10 모달을 코드와 맞춤. |
+| D40 | BMAD Method(BMM v6.12) 개발 워크플로 설치. Grok 스킬. 제품 기능 아님. |
+| D41 | BMAD 스킬을 help/spec/build 3개로 축소. 제품 기능 아님. |
+| D42 | `bmad-brainstorming` 복원. 유지 4개: help / brainstorming / spec / build. |
+| D43 | 손댈 칸/나중에 입력. 빈 채움 값은 재생이 덮지 않고 노란 표시. 셀렉터 실패만 누락. |
+| D44 | 위험 클릭 재생 금지. 기본 단어 10개(상신·결재·결제·결제하기·구매하기·전송·송금·이체·Pay·Purchase) 보이는 글자 매칭, 편집 덮어쓰기, 그룹 auto도 대기. |
+| D45 | 파일 첨부 칸에서 멈춤. fileStop은 실패 아님, 직접 첨부 안내. |
+| D46 | 프리셋별 재생 속도. 전역 유지하되 프리셋이 덮음, 사이트 하드코딩 없음. |
+| D47 | 깨진 칸만 다시 찍기. 캡처 재사용·replaceFieldId로 selector 갱신, 전체 재녹화 없음. |
+| D48 | 값 없는 스크럽 내보내기. 필드 값만 비움, 그룹 포함, 실값 경로 유지. |
 
 ## 8. 보류/미구현 항목
 
@@ -410,3 +504,11 @@
 | 2026-08-30 | D34 | 제품 기획서 역생성 (`기획서.md`). 기능 변경 없음. 메타프롬프트 `메타-프롬프트-기획서-역생성.md`. | — |
 | 2026-08-30 | D35 | 늦게 생긴 iframe이 녹화 세션에 합류 (R18-5). 메타프롬프트 `메타-프롬프트-iframe-녹화-검토.md`. | — |
 | 2026-08-30 | D36 | QA 엣지케이스 도출·실행 (`QA-엣지케이스.md`, `test:qa`, e2e I~L). 메타프롬프트 `메타-프롬프트-QA-엣지케이스-진행.md`. | — |
+| 2026-08-30 | D37 | 사내 테스트 한정 기안 (기획팅 + `docs/기안-사내테스트-다시하기.md`). 코드 변경 없음. 메타프롬프트 `메타-프롬프트-사내테스트-기안-기획서.md`. | — |
+| 2026-08-30 | D38 | 기안 승인 (§11 네 항목). 코드 변경 없음. 메타프롬프트 `메타-프롬프트-사내테스트-기안-승인.md`. | — |
+| 2026-09-05 | D39 | 소스 기준 문서 최신화 (테스트 수, 저장 키, R3-4/R5/R11-10/R17/R18-4, iframe 유즈케이스). 코드 변경 없음. 메타프롬프트 `메타-프롬프트-소스기준-문서최신화.md`. | — |
+| 2026-09-05 | D40 | BMAD Method 설치 (`_bmad/`, Grok 29 스킬). 제품 코드 변경 없음. 메타프롬프트 `메타-프롬프트-BMAD-설치.md`. | — |
+| 2026-09-05 | D41 | BMAD 스킬 축소: help / spec / build만. 메타프롬프트 `메타-프롬프트-BMAD-스킬-축소.md`. | — |
+| 2026-09-05 | D42 | `bmad-brainstorming` 복원. 메타프롬프트 `메타-프롬프트-BMAD-브레인스토밍-유지.md`. | — |
+| 2026-09-05 | D43 | 손댈 칸/나중에 입력(R19). 메타프롬프트 `메타-프롬프트-손댈칸-나중에입력.md`. | — |
+| 2026-09-05 | D44~D48 | 채움 초안 CAP-4~7: 위험 클릭 금지(R20)·파일 스톱(R21)·프리셋 속도(R22)·리픽(R23)·스크럽(R24). `replayBlocked`/`replayPace`/`fileStop`/`replaceFieldId`/`scrub`. 테스트 141→161. 메타프롬프트 `메타-프롬프트-채움초안-스토리2-6.md`. | — |

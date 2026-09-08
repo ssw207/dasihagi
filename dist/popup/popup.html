@@ -28,11 +28,12 @@
     <section id="presets-view">
       <div class="toolbar">
         <button class="btn btn-primary" id="btn-record-site">이 사이트 녹화</button>
-        <button class="btn" id="btn-new-preset">+ 새 프리셋</button>
+        <button class="btn" id="btn-new-capture-preset">캡처로 만들기</button>
         <div class="toolbar-more">
-          <button type="button" class="btn" id="btn-more" aria-haspopup="true" aria-expanded="false">더보기</button>
+          <button type="button" class="btn" id="btn-more" aria-label="더보기" aria-haspopup="true" aria-expanded="false">⋯</button>
           <div class="menu hidden" id="more-menu">
             <button type="button" class="menu-item" id="btn-export">내보내기</button>
+            <button type="button" class="menu-item" id="btn-export-scrub">값 없이 내보내기</button>
             <button type="button" class="menu-item" id="btn-import">가져오기</button>
           </div>
         </div>
@@ -47,12 +48,16 @@
       <div class="pace-row">
         <span class="pace-label">재생 속도</span>
         <div class="pace-seg" role="radiogroup" aria-label="재생 속도">
+          <button type="button" class="pace-btn" data-pace="max">최고속도</button>
           <button type="button" class="pace-btn" data-pace="fast">빠름</button>
           <button type="button" class="pace-btn is-on" data-pace="normal">보통</button>
           <button type="button" class="pace-btn" data-pace="slow">느림</button>
         </div>
       </div>
       <p class="hint pace-hint">페이지 이동 뒤 쉬는 시간입니다. 사내처럼 제한이 없으면 빠름을 쓰세요.</p>
+      <div id="replay-stop-wrap" class="hidden" style="margin-bottom:8px">
+        <button type="button" class="btn btn-danger" id="btn-stop-replay" style="width:100%">재생 중지</button>
+      </div>
       <div class="toolbar toolbar-select hidden" id="preset-select-bar">
         <label class="check-row select-all-row">
           <input type="checkbox" id="chk-select-all">
@@ -100,13 +105,26 @@
           <span>페이지 진입 시 자동 적용</span>
         </label>
         <p class="hint hidden" id="ed-autoapply-hint">여정 프리셋은 페이지 진입 시 자동 적용하지 않습니다. 목록에서 재생하세요.</p>
+        <div class="pace-row" id="ed-pace-row">
+          <span class="pace-label">이 프리셋 재생 속도</span>
+          <div class="pace-seg" role="radiogroup" aria-label="이 프리셋 재생 속도">
+            <button type="button" class="pace-btn is-on" data-ed-pace="">전역 따름</button>
+            <button type="button" class="pace-btn" data-ed-pace="max">최고속도</button>
+            <button type="button" class="pace-btn" data-ed-pace="fast">빠름</button>
+            <button type="button" class="pace-btn" data-ed-pace="normal">보통</button>
+            <button type="button" class="pace-btn" data-ed-pace="slow">느림</button>
+          </div>
+        </div>
 
-        <div class="fields-head">
+        <div class="fields-head" id="fields-head" style="position:sticky; top:0; background:#f9fafb; z-index:5; padding:4px 0">
           <h3>저장된 필드 <span class="field-count" id="field-count">0</span></h3>
           <button class="btn btn-small btn-primary" id="btn-record">녹화 시작</button>
           <button class="btn btn-small" id="btn-capture">캡처 모드 시작</button>
         </div>
-        <div class="fields-list" id="fields-list"></div>
+        <div style="margin:4px 0 6px">
+          <input type="text" id="field-search" placeholder="필드 검색 (라벨/값/타입)" style="width:100%; padding:5px 8px; border:1px solid #d1d5db; border-radius:6px; font-size:11px; display:none">
+        </div>
+        <div class="fields-list" id="fields-list" style="max-height:320px; overflow-y:auto"></div>
         <div class="fields-empty" id="fields-empty">아직 저장된 필드가 없습니다.</div>
         <p class="hint">저장값은 암호화됩니다. 민감 체크는 목록에서 값을 가립니다.</p>
 

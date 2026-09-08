@@ -241,6 +241,10 @@ await scenario('E5 SETTINGS 이상한 값은 normal', async () => {
   assert.equal(set.replayPace, 'normal');
   const got = await call('SETTINGS_GET');
   assert.equal(got.replayPace, 'normal');
+  const setMax = await call('SETTINGS_SET', { replayPace: 'max' });
+  assert.equal(setMax.replayPace, 'max');
+  const gotMax = await call('SETTINGS_GET');
+  assert.equal(gotMax.replayPace, 'max');
 });
 
 await scenario('E6 포트 포함 패턴 매칭', async () => {

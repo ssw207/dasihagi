@@ -1,6 +1,6 @@
 # QA 엣지케이스 — 다시하기
 
-기준: 2026-08-30 · v0.1.0 · R1~R18 · D35 지연 iframe 합류  
+기준: 2026-09-05 · v0.1.0 · R1~R18 · 소스 동기화(D39). D35 지연 iframe 합류, D36 QA 스위트  
 팀: 보안 / 엣지 / 흐름 / 데이터 / UX (교차 검증)
 
 판정: **PASS** 실행 확인 · **커버** 기존 스위트 · **한계** 제품이 의도적으로 안 함 · **미실행** 실사이트/권한 부족
@@ -123,7 +123,7 @@ npm run test:e2e
 | `npm run check` | PASS (manifest OK) |
 | `test:encrypt` | 13/13 |
 | `test:pii` | 30/30 |
-| `test:replay` | 99/99 |
+| `test:replay` | 141/141 |
 | `test:qa` | **22/22 PASS** |
 | `test:e2e` | **71/71 PASS** (I 중첩, J src 교체, K 작은 iframe, L 유니코드 포함) |
 

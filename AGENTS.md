@@ -15,5 +15,10 @@
 - 모든 UI 문자열 한국어
 - 저장소: `chrome.storage.local` — 프리셋은 프리셋별 암호화 blob(`sec:preset:<id>`) + 평문 인덱스(`presets`), 그룹은 평문(`groups`)
 - 민감값/프리셋 암호화: `secure-store.js` (AES-256-GCM, 키 `vault_key_v1`)
-- 검증: `npm run check` / `npm run build` / `npm run test:encrypt` / `npm run test:pii` / `npm run test:replay`
-- 프로젝트 루트 `C:\Users\hoo kim\orca\projects\my-chrome-extension`
+- 검증: `npm run check` / `npm run build` / `npm run test:encrypt` / `npm run test:pii` / `npm run test:replay` / `npm run test:qa` / `npm run test:e2e`
+- 프로젝트 루트 `C:\Users\hoo kim\orca\dasihagi`
+
+## BMAD (개발 워크플로, D40)
+
+- `_bmad/` + Grok 스킬 4개: `bmad-help`, `bmad-brainstorming`, `bmad-spec`(기획), `bmad-build`(구현). 제품 런타임과 무관.
+- 산출물은 `_bmad-output/` (gitignore). 영구 규칙(메타프롬프트)이 BMAD보다 우선. `npx bmad-method install`을 다시 돌리면 스킬이 복원되므로 돌리지 말 것.

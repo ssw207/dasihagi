@@ -1,2 +1,5 @@
 node_modules/
 test/artifacts/
+_bmad-output/
+_bmad/config.user.toml
+_bmad/custom/config.user.toml

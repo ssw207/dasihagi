@@ -1,5 +1,5 @@
 (() => {
-  const capture = { active: false, presetId: null };
+  const capture = { active: false, presetId: null, replaceFieldId: null };
   const record = {
     active: false,
     presetId: null,
@@ -15,6 +15,9 @@
   let panelTarget = null;
   let highlightObserver = null;
   let recordChipEl = null;
+  let captureChipEl = null;
+  let replayAbort = false;
+  let replaySleepResolver = null;
 
   // 비보안 컨텍스트(http://)에서 crypto.randomUUID가 없을 때 사용할 폴백 UUID 생성기
   function generateUuid() {
@@ -56,6 +59,9 @@
       '.fp-panel .fp-hint{font-size:11px !important;color:#6b7280 !important;margin-top:8px !important;line-height:1.4 !important}',
       '.fp-panel .fp-chip{display:inline-block !important;max-width:100% !important;overflow:hidden !important;text-overflow:ellipsis !important;white-space:nowrap !important;font-size:11px !important;color:#1d4ed8 !important;background:#dbeafe !important;border-radius:4px !important;padding:2px 6px !important;margin-top:4px !important}',
       '.fp-apply-flash{outline:2px solid #10b981 !important;outline-offset:2px !important;transition:outline-color .8s ease !important}',
+      '.fp-hand-edit{outline:2px solid #eab308 !important;outline-offset:2px !important;background-color:rgba(234,179,8,.12) !important}',
+      '.fp-file-stop{outline:2px dashed #f97316 !important;outline-offset:2px !important}',
+      '.fp-blocked-click{outline:2px dashed #ef4444 !important;outline-offset:2px !important}',
       '.fp-record-chip{position:fixed !important;top:16px !important;left:50% !important;transform:translateX(-50%) !important;z-index:2147483647 !important;display:flex !important;align-items:center !important;gap:10px !important;background:#111 !important;color:#fff !important;border-radius:8px !important;padding:8px 14px !important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;font-size:13px !important;font-weight:600 !important;box-shadow:0 4px 16px rgba(0,0,0,.3) !important;box-sizing:border-box !important}',
       '.fp-record-chip *{box-sizing:border-box !important;margin:0 !important}',
       '.fp-record-chip .fp-record-dot{width:10px !important;height:10px !important;border-radius:50% !important;background:#ef4444 !important;animation:fp-blink 1s infinite !important;flex:none !important}',
@@ -225,14 +231,14 @@
     let valueHtml = '';
     if (isBoolean) {
       valueHtml =
-        '<div id="fp-value-row" style="display:none">' +
+        '<div id="fp-value-row">' +
         '<label class="fp-check"><input type="checkbox" id="fp-value" ' +
         (el.checked ? 'checked' : '') +
         '><span>체크된 상태로 저장</span></label>' +
         '</div>';
     } else {
       valueHtml =
-        '<div id="fp-value-row" style="display:none">' +
+        '<div id="fp-value-row">' +
         '<label for="fp-value">저장할 값</label><input type="text" id="fp-value" autocomplete="off">' +
         '</div>';
     }
@@ -248,7 +254,7 @@
       valueHtml +
       sensitiveHtml +
       '<div class="fp-actions"><button class="fp-save" id="fp-save">저장</button><button class="fp-cancel" id="fp-cancel">취소</button></div>' +
-      '<div class="fp-hint">표시 이름 입력 후 Enter → 값 입력, 값 입력 후 Enter로 저장합니다. 계속 캡처 모드가 유지됩니다.</div>' +
+      '<div class="fp-hint">값만 입력하고 저장하면 됩니다. 표시 이름은 자동이며 필요하면 수정하세요. 계속 캡처 모드가 유지됩니다.</div>' +
       '<div class="fp-status" id="fp-status" style="display:none"></div>';
 
     document.body.appendChild(panelEl);
@@ -289,7 +295,7 @@
       ) {
         field.sensitive = true;
       }
-      if (!isBoolean && !field.value) {
+      if (!isBoolean && !field.value && !capture.replaceFieldId) {
         showStatus('값을 입력해주세요.', true);
         return;
       }
@@ -316,8 +322,12 @@
       saveFromPanel();
     });
 
-    labelInput.focus();
-    if (!isBoolean) labelInput.select();
+    if (isBoolean) {
+      labelInput.focus();
+      labelInput.select();
+    } else {
+      valueInput.focus();
+    }
   }
 
   function showStatus(text, isError) {
@@ -333,7 +343,7 @@
 
   function saveField(field) {
     chrome.runtime.sendMessage(
-      { type: 'CAPTURE_SAVE_FIELD', presetId: capture.presetId, field },
+      { type: 'CAPTURE_SAVE_FIELD', presetId: capture.presetId, field, replaceFieldId: capture.replaceFieldId },
       (resp) => {
         if (chrome.runtime.lastError) {
           showStatus('저장 실패: ' + chrome.runtime.lastError.message, true);
@@ -346,6 +356,7 @@
         if (panelTarget) panelTarget.classList.remove('fp-capture-input');
         panelTarget = null;
         showStatus('저장 완료!');
+        setTimeout(() => closePanel(), 600);
       }
     );
   }
@@ -358,22 +369,64 @@
     panelTarget = null;
   }
 
-  function startCaptureMode(presetId) {
+  function showCaptureChip() {
+    if (captureChipEl) return;
+    if (!shouldShowRecordChip()) return;
+    if (!document.body) {
+      document.addEventListener(
+        'DOMContentLoaded',
+        () => {
+          if (capture.active) showCaptureChip();
+        },
+        { once: true }
+      );
+      return;
+    }
+    captureChipEl = document.createElement('div');
+    captureChipEl.className = 'fp-record-chip';
+    captureChipEl.style.background = '#2563eb';
+    captureChipEl.innerHTML =
+      '<span class="fp-record-dot" style="background:#93c5fd"></span>' +
+      '<span>캡처 중 · 클릭하여 필드 저장</span>' +
+      '<button id="fp-capture-stop">종료</button>';
+    document.body.appendChild(captureChipEl);
+    captureChipEl.querySelector('#fp-capture-stop').addEventListener('click', () => {
+      chrome.runtime.sendMessage({ type: 'CAPTURE_STOP' }, () => {
+        stopCaptureMode();
+        hideCaptureChip();
+      });
+      stopCaptureMode();
+      hideCaptureChip();
+    });
+  }
+
+  function hideCaptureChip() {
+    if (captureChipEl) {
+      captureChipEl.remove();
+      captureChipEl = null;
+    }
+  }
+
+  function startCaptureMode(presetId, opts) {
     capture.active = true;
     capture.presetId = presetId;
+    capture.replaceFieldId = opts && opts.replaceFieldId ? opts.replaceFieldId : null;
     injectStyles();
     highlightAll();
     observeHighlights();
     document.addEventListener('click', onCaptureClick, true);
+    showCaptureChip();
   }
 
   function stopCaptureMode() {
     capture.active = false;
     capture.presetId = null;
+    capture.replaceFieldId = null;
     closePanel();
     unobserveHighlights();
     document.removeEventListener('click', onCaptureClick, true);
     document.querySelectorAll('.fp-capture-input').forEach((el) => el.classList.remove('fp-capture-input'));
+    hideCaptureChip();
   }
 
   // ---------- 녹화 모드 (행동 기록) ----------
@@ -663,10 +716,23 @@
   // ---------- 순차 재생 (녹화된 행동을 타이밍대로 재생) ----------
 
   function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    if (replayAbort) return Promise.resolve();
+    if (ms <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        replaySleepResolver = null;
+        resolve();
+      }, ms);
+      replaySleepResolver = () => {
+        clearTimeout(t);
+        replaySleepResolver = null;
+        resolve();
+      };
+    });
   }
 
   function waitForElement(selector, timeoutMs) {
+    if (replayAbort) return Promise.resolve(null);
     return new Promise((resolve) => {
       let found = null;
       try {
@@ -681,6 +747,11 @@
       }
       const start = Date.now();
       const timer = setInterval(() => {
+        if (replayAbort) {
+          clearInterval(timer);
+          resolve(null);
+          return;
+        }
         let el = null;
         try {
           el = document.querySelector(selector);
@@ -699,6 +770,7 @@
   }
 
   function paceDelayMs(raw, pace) {
+    if (pace === 'max') return 0;
     const d = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), RECORD_MAX_DELAY) : 150;
     if (pace === 'fast') return Math.min(d, 40);
     if (pace === 'slow') return Math.min(Math.round(d * 1.5) + 200, RECORD_MAX_DELAY);
@@ -706,32 +778,41 @@
   }
 
   function paceWaitElementMs(pace) {
+    if (pace === 'max') return 500;
     if (pace === 'fast') return 2500;
     if (pace === 'slow') return 8000;
     return 5000;
   }
 
   async function replaySequential(preset, replayPace) {
+    replayAbort = false;
     const fields = Array.isArray(preset.fields) ? preset.fields : [];
     const applied = [];
     const failures = [];
     const waitEl = paceWaitElementMs(replayPace);
     for (const field of fields) {
+      if (replayAbort) return { applied, failures, aborted: true };
       await sleep(paceDelayMs(field.delay, replayPace));
+      if (replayAbort) return { applied, failures, aborted: true };
       const el = await waitForElement(field.selector, waitEl);
+      if (replayAbort) return { applied, failures, aborted: true };
       if (!el) {
-        failures.push({ ok: false, label: field.label, reason: '요소를 찾을 수 없음' });
+        failures.push({ ok: false, label: field.label, reason: '요소를 찾을 수 없음', fieldId: field.id });
         continue;
       }
       const res = applyField(field);
       if (res.ok) {
         applied.push(res);
-        el.classList.add('fp-apply-flash');
-        setTimeout(() => el.classList.remove('fp-apply-flash'), 1200);
+        if (res.blocked) break;
+        if (!res.handEdit && !res.fileStop) {
+          el.classList.add('fp-apply-flash');
+          setTimeout(() => el.classList.remove('fp-apply-flash'), 1200);
+        }
       } else {
-        failures.push(res);
+        failures.push(Object.assign({ fieldId: field.id }, res));
       }
     }
+    if (replayAbort) return { applied, failures, aborted: true };
     return { applied, failures };
   }
 
@@ -772,6 +853,50 @@
     return null;
   }
 
+  function isFillFieldType(type) {
+    return type === 'text' || type === 'textarea' || type === 'select' || type === 'checkbox' || type === 'radio';
+  }
+
+  function isHandEditField(field) {
+    if (!field || !isFillFieldType(field.type || 'text')) return false;
+    if (typeof field.handEdit === 'boolean') return field.handEdit;
+    return String(field.value == null ? '' : field.value) === '';
+  }
+
+  const DANGER_CLICK_WORDS = ['상신', '결재', '결제하기', '구매하기', '결제', '전송', '송금', '이체', 'Pay', 'Purchase'];
+
+  function matchesDangerText(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return false;
+    const lower = raw.toLowerCase();
+    for (const word of DANGER_CLICK_WORDS) {
+      if (raw === word || raw.endsWith(word)) return true;
+      const w = word.toLowerCase();
+      if (lower === w || lower.endsWith(w)) return true;
+    }
+    return false;
+  }
+
+  function isReplayBlockedClick(field, el) {
+    if (!field || field.type !== 'click') return false;
+    if (typeof field.replayBlocked === 'boolean') return field.replayBlocked;
+    return matchesDangerText(field.value) || matchesDangerText(visibleText(el));
+  }
+
+  function markHandEdit(el) {
+    if (!el || !el.classList) return;
+    el.classList.add('fp-hand-edit');
+    const clear = () => {
+      el.classList.remove('fp-hand-edit');
+      if (typeof el.removeEventListener === 'function') {
+        el.removeEventListener('input', clear);
+        el.removeEventListener('change', clear);
+      }
+    };
+    el.addEventListener('input', clear);
+    el.addEventListener('change', clear);
+  }
+
   function applyField(field) {
     if (field.type === 'navigate') {
       return { ok: true, label: field.label };
@@ -787,10 +912,14 @@
         }
       }
       if (!el) el = findByVisibleText(field.value);
-      if (!el) return { ok: false, label: field.label, reason: '요소를 찾을 수 없음' };
+      if (!el) return { ok: false, label: field.label, reason: '요소를 찾을 수 없음', fieldId: field.id };
+      if (isReplayBlockedClick(field, el)) {
+        if (el.classList) el.classList.add('fp-blocked-click');
+        return { ok: true, label: field.label, blocked: true, reason: '직접 누르세요', fieldId: field.id };
+      }
       if (typeof el.click === 'function') el.click();
       else el.dispatchEvent(new Event('click', { bubbles: true }));
-      return { ok: true, label: field.label };
+      return { ok: true, label: field.label, fieldId: field.id };
     }
 
     if (field.type === 'keydown') {
@@ -823,7 +952,17 @@
     } catch (e) {
       return { ok: false, label: field.label, reason: '잘못된 셀렉터' };
     }
-    if (!el) return { ok: false, label: field.label, reason: '요소를 찾을 수 없음' };
+    if (!el) return { ok: false, label: field.label, reason: '요소를 찾을 수 없음', fieldId: field.id };
+
+    if (el instanceof HTMLInputElement && el.type === 'file') {
+      if (el.classList) el.classList.add('fp-file-stop');
+      return { ok: true, label: field.label, fileStop: true, reason: '직접 첨부', fieldId: field.id };
+    }
+
+    if (isHandEditField(field)) {
+      markHandEdit(el);
+      return { ok: true, label: field.label, handEdit: true };
+    }
 
     if (field.type === 'checkbox' || field.type === 'radio') {
       const checked = String(field.value) === 'true';
@@ -863,28 +1002,36 @@
   }
 
   function applyPreset(preset, replayPace) {
-    // 녹화된 필드(delay 포함)는 순차 재생 — 기록된 순서와 타이밍대로 적용
+    replayAbort = false;
     const hasDelay = Array.isArray(preset.fields) && preset.fields.some((f) => Number.isFinite(f.delay));
     if (hasDelay) return replaySequential(preset, replayPace);
 
     return new Promise((resolve) => {
       const failures = [];
       const applied = [];
-      // 호출별 격리: 재진입 시 이전 호출의 상태를 무효화하지 않아 Promise가 영원히 미해소되지 않는다.
       const abort = { failures: preset.fields.slice(), observer: null, timer: null, done: false };
 
       function tryApply() {
         if (abort.done) return;
+        if (replayAbort) {
+          clearTimeout(abort.timer);
+          abort.observer.disconnect();
+          abort.done = true;
+          resolve({ applied, failures: abort.failures, aborted: true });
+          return;
+        }
         const remaining = abort.failures;
         const next = [];
         for (const field of remaining) {
           const res = applyField(field);
           if (res.ok) {
             applied.push(res);
-            const el = document.querySelector(field.selector);
-            if (el) {
-              el.classList.add('fp-apply-flash');
-              setTimeout(() => el.classList.remove('fp-apply-flash'), 1200);
+            if (!res.handEdit && !res.fileStop && !res.blocked) {
+              const el = document.querySelector(field.selector);
+              if (el) {
+                el.classList.add('fp-apply-flash');
+                setTimeout(() => el.classList.remove('fp-apply-flash'), 1200);
+              }
             }
           } else {
             next.push(field);
@@ -911,6 +1058,13 @@
 
       setTimeout(() => {
         if (abort.done) return;
+        if (replayAbort) {
+          clearTimeout(abort.timer);
+          abort.observer.disconnect();
+          abort.done = true;
+          resolve({ applied, failures: abort.failures, aborted: true });
+          return;
+        }
         const failed = abort.failures;
         clearTimeout(abort.timer);
         abort.observer.disconnect();
@@ -943,6 +1097,10 @@
         }
         if (btn) {
           if (isSubmitElement(btn)) {
+            if (matchesDangerText(visibleText(btn) || btn.value)) {
+              resolve({ ok: true, blocked: true, clicked: false });
+              return;
+            }
             btn.click();
             resolve({ ok: true, clicked: true });
             return;
@@ -956,6 +1114,10 @@
           document.querySelector('form input[type="button"]');
         if (btn) {
           if (isSubmitElement(btn)) {
+            if (matchesDangerText(visibleText(btn) || btn.value)) {
+              resolve({ ok: true, blocked: true, clicked: false });
+              return;
+            }
             btn.click();
             resolve({ ok: true, clicked: true });
             return;
@@ -984,7 +1146,7 @@
     // 자기 확장의 background에서 온 메시지만 처리 (타 확장의 APPLY_PRESET/SUBMIT_FORM 주입 차단)
     if (sender.id !== chrome.runtime.id) return false;
     if (msg.type === 'CAPTURE_START') {
-      startCaptureMode(msg.presetId);
+      startCaptureMode(msg.presetId, { replaceFieldId: msg.replaceFieldId });
       sendResponse({ ok: true });
       return false;
     }
@@ -1023,6 +1185,15 @@
         sendResponse({ result: result });
       });
       return true;
+    }
+    if (msg.type === 'REPLAY_ABORT') {
+      replayAbort = true;
+      if (replaySleepResolver) {
+        replaySleepResolver();
+        replaySleepResolver = null;
+      }
+      sendResponse({ ok: true });
+      return false;
     }
     if (msg.type === 'SUBMIT_FORM') {
       submitForm(msg.selector).then((result) => {
