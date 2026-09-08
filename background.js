@@ -16,7 +16,7 @@ const RECORD_MAX_DELAY = 5000;
 const REPLAY_PACE_KEY = 'ui:replayPace';
 
 function normalizeReplayPace(v) {
-  return v === 'fast' || v === 'slow' ? v : 'normal';
+  return v === 'fast' || v === 'slow' || v === 'max' ? v : 'normal';
 }
 
 async function getReplayPace() {
@@ -29,6 +29,7 @@ async function getReplayPace() {
 }
 
 function paceDelayMs(raw, pace) {
+  if (pace === 'max') return 0;
   const d = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), RECORD_MAX_DELAY) : 150;
   if (pace === 'fast') return Math.min(d, 40);
   if (pace === 'slow') return Math.min(Math.round(d * 1.5) + 200, RECORD_MAX_DELAY);
@@ -36,18 +37,21 @@ function paceDelayMs(raw, pace) {
 }
 
 function paceAfterNavigateMs(pace) {
+  if (pace === 'max') return 0;
   if (pace === 'fast') return 0;
   if (pace === 'slow') return 1000;
   return 200;
 }
 
 function paceTabWaitMs(pace) {
+  if (pace === 'max') return 1500;
   if (pace === 'fast') return 8000;
   if (pace === 'slow') return 20000;
   return 15000;
 }
 
 function paceWaitElementMs(pace) {
+  if (pace === 'max') return 500;
   if (pace === 'fast') return 2500;
   if (pace === 'slow') return 8000;
   return 5000;
@@ -56,6 +60,7 @@ function paceWaitElementMs(pace) {
 let recordSessions = {}; // tabId → session (같은 sessionId는 객체 공유: 팝업 탭 이어 녹화)
 let journeyReplayTabId = null;
 const tabCompleteWaiters = [];
+const replayAborts = new Map();
 
 let runState = null;
 let groupRunInFlight = false; // RUN_GROUP 이중 진입 방지 (첫 await 전 동기 선점)
@@ -104,12 +109,25 @@ async function getPresetById(id) {
     const fields = [];
     for (const f of preset.fields) {
       if (!f || typeof f !== 'object') return null;
-      fields.push({
+      const value = f.value == null ? '' : String(f.value);
+      const type = f.type || 'text';
+      const next = {
         ...f,
         label: typeof f.label === 'string' ? f.label : String(f.label == null ? '필드' : f.label),
         selector: typeof f.selector === 'string' ? f.selector : String(f.selector || ''),
-        value: f.value == null ? '' : String(f.value)
-      });
+        value
+      };
+      if (isFillFieldType(type)) {
+        next.handEdit = resolveHandEdit({ type, value, handEdit: f.handEdit });
+      } else if ('handEdit' in next) {
+        delete next.handEdit;
+      }
+      if (type === 'click') {
+        next.replayBlocked = resolveReplayBlocked({ type, value, replayBlocked: f.replayBlocked });
+      } else if ('replayBlocked' in next) {
+        delete next.replayBlocked;
+      }
+      fields.push(next);
     }
     preset.fields = fields;
     return preset;
@@ -270,6 +288,8 @@ async function sendApplyToFrames(tabId, msg) {
     return { result: mergeApplyPresetResults(results) };
   }
   if (msg.type === 'SUBMIT_FORM') {
+    const blocked = results.find((r) => r.ok && r.resp && r.resp.blocked);
+    if (blocked) return blocked.resp;
     const hit = results.find((r) => r.ok && r.resp && r.resp.ok);
     return hit ? hit.resp : { ok: false, reason: '제출 버튼을 찾을 수 없습니다.' };
   }
@@ -371,16 +391,72 @@ function normalizeNavUrl(url) {
   }
 }
 
+function isFillFieldType(type) {
+  return type === 'text' || type === 'textarea' || type === 'select' || type === 'checkbox' || type === 'radio';
+}
+
+function resolveHandEdit(field) {
+  if (!field || !isFillFieldType(field.type || 'text')) return false;
+  if (typeof field.handEdit === 'boolean') return field.handEdit;
+  return String(field.value == null ? '' : field.value) === '';
+}
+
+const DANGER_CLICK_WORDS = ['상신', '결재', '결제하기', '구매하기', '결제', '전송', '송금', '이체', 'Pay', 'Purchase'];
+
+function matchesDangerText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const lower = raw.toLowerCase();
+  for (const word of DANGER_CLICK_WORDS) {
+    if (raw === word || raw.endsWith(word)) return true;
+    const w = word.toLowerCase();
+    if (lower === w || lower.endsWith(w)) return true;
+  }
+  return false;
+}
+
+function resolveReplayBlocked(field) {
+  if (!field || field.type !== 'click') return false;
+  if (typeof field.replayBlocked === 'boolean') return field.replayBlocked;
+  return matchesDangerText(field.value);
+}
+
+function resolvePresetPace(preset, globalPace) {
+  const p = preset && preset.replayPace;
+  if (p === 'fast' || p === 'slow' || p === 'normal' || p === 'max') return p;
+  return globalPace === 'fast' || globalPace === 'slow' || globalPace === 'max' ? globalPace : 'normal';
+}
+
+function scrubPresetForExport(preset) {
+  const copy = JSON.parse(JSON.stringify(preset || {}));
+  copy.fields = Array.isArray(copy.fields)
+    ? copy.fields.map((f) => {
+        const next = { ...f, value: '' };
+        return next;
+      })
+    : [];
+  return copy;
+}
+
 function normalizeRecordEvent(e) {
-  return {
+  const type = e.type || 'text';
+  const value = e.value == null ? '' : String(e.value);
+  const field = {
     id: e.id || crypto.randomUUID(),
     label: e.label || '필드',
     selector: typeof e.selector === 'string' ? e.selector : '',
-    value: e.value == null ? '' : String(e.value),
-    type: e.type || 'text',
+    value,
+    type,
     delay: e.delay,
     sensitive: !!e.sensitive
   };
+  if (isFillFieldType(type)) {
+    field.handEdit = resolveHandEdit({ type, value, handEdit: e.handEdit });
+  }
+  if (type === 'click') {
+    field.replayBlocked = resolveReplayBlocked({ type, value, replayBlocked: e.replayBlocked });
+  }
+  return field;
 }
 
 function appendSessionEvent(session, raw) {
@@ -399,6 +475,9 @@ function appendSessionEvent(session, raw) {
   if (mergeable && last && last.selector === field.selector && last.type === field.type) {
     last.value = field.value;
     last.sensitive = !!(last.sensitive || field.sensitive);
+    if (isFillFieldType(last.type)) {
+      last.handEdit = resolveHandEdit({ type: last.type, value: last.value });
+    }
     return session.events.length;
   }
   if (session.events.length >= MAX_FIELDS_PER_PRESET) {
@@ -494,14 +573,28 @@ async function replayJourney(tabId, preset) {
   const fields = Array.isArray(preset.fields) ? preset.fields : [];
   const applied = [];
   const failures = [];
-  const pace = await getReplayPace();
+  const pace = resolvePresetPace(preset, await getReplayPace());
   const tabWait = paceTabWaitMs(pace);
   const afterNav = paceAfterNavigateMs(pace);
   const waitEl = paceWaitElementMs(pace);
   journeyReplayTabId = tabId;
+  const isMax = pace === 'max';
+  const abortCtrl = { aborted: false };
+  replayAborts.set(tabId, abortCtrl);
+  async function fireNavigate(tId, url) {
+    try {
+      const tab = await chrome.tabs.get(tId);
+      if (normalizeNavUrl(tab.url) === normalizeNavUrl(url)) return true;
+      await chrome.tabs.update(tId, { url });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   try {
     if (preset.startUrl) {
-      const moved = await navigateTab(tabId, preset.startUrl, tabWait);
+      if (abortCtrl.aborted) return { applied, failures, aborted: true };
+      const moved = isMax ? await fireNavigate(tabId, preset.startUrl) : await navigateTab(tabId, preset.startUrl, tabWait);
       if (!moved) {
         failures.push({ ok: false, label: '시작 페이지', reason: '시작 페이지로 이동하지 못했습니다.' });
         return { applied, failures };
@@ -509,10 +602,12 @@ async function replayJourney(tabId, preset) {
       if (afterNav) await new Promise((r) => setTimeout(r, afterNav));
     }
     for (const field of fields) {
+      if (abortCtrl.aborted) return { applied, failures, aborted: true };
       await new Promise((r) => setTimeout(r, paceDelayMs(field.delay, pace)));
+      if (abortCtrl.aborted) return { applied, failures, aborted: true };
       if (field.type === 'navigate') {
         try {
-          const moved = await navigateTab(tabId, field.value, tabWait);
+          const moved = isMax ? await fireNavigate(tabId, field.value) : await navigateTab(tabId, field.value, tabWait);
           if (!moved) {
             failures.push({ ok: false, label: field.label, reason: '페이지 이동 시간 초과' });
             continue;
@@ -537,11 +632,13 @@ async function replayJourney(tabId, preset) {
         const res = resp && resp.result;
         if (res && res.ok) {
           applied.push(res);
+          if (res.blocked) break;
         } else {
-          failures.push(res || { ok: false, label: field.label, reason: '적용 실패' });
+          failures.push(res || { ok: false, label: field.label, reason: '적용 실패', fieldId: field.id });
         }
       } catch (e) {
-        const moved = await waitForTabComplete(tabId, Math.min(tabWait, 8000));
+        const waitMs = isMax ? 200 : Math.min(tabWait, 8000);
+        const moved = await waitForTabComplete(tabId, waitMs);
         if (moved) {
           applied.push({ ok: true, label: field.label });
         } else {
@@ -549,8 +646,10 @@ async function replayJourney(tabId, preset) {
         }
       }
     }
+    if (abortCtrl.aborted) return { applied, failures, aborted: true };
     return { applied, failures };
   } finally {
+    replayAborts.delete(tabId);
     journeyReplayTabId = null;
   }
 }
@@ -868,7 +967,7 @@ async function handleStepTabLoaded(tabId) {
 
   let applyResult = { applied: [], failures: [] };
   try {
-    const replayPace = await getReplayPace();
+    const replayPace = resolvePresetPace(preset, await getReplayPace());
     const resp = await sendApplyToFrames(tabId, { type: 'APPLY_PRESET', preset, replayPace });
     applyResult = (resp && resp.result) || applyResult;
   } catch (e) {
@@ -888,6 +987,11 @@ async function handleStepTabLoaded(tabId) {
         type: 'SUBMIT_FORM',
         selector: stepInfo.submitSelector
       });
+      if (submitResp && submitResp.blocked) {
+        runState.status = 'waiting';
+        await persistRunState();
+        return;
+      }
       if (!submitResp || !submitResp.ok) {
         const reason = submitResp && submitResp.reason ? submitResp.reason : '제출 실패';
         await failRun('스텝 "' + stepInfo.presetName + '" 제출 실패: ' + reason);
@@ -1043,15 +1147,24 @@ async function handleMessage(msg, sender) {
     }
     case 'CAPTURE_START': {
       captureTabs.add(msg.tabId);
-      const cap = await sendToAllFrames(msg.tabId, { type: 'CAPTURE_START', presetId: msg.presetId });
+      const cap = await sendToAllFrames(msg.tabId, {
+        type: 'CAPTURE_START',
+        presetId: msg.presetId,
+        replaceFieldId: msg.replaceFieldId
+      });
       if (!cap.some((r) => r.ok)) {
         throw new Error('페이지에서 캡처 모드를 시작할 수 없습니다. 지원되지 않는 페이지(예: chrome://)입니다.');
       }
       return true;
     }
     case 'CAPTURE_STOP': {
-      captureTabs.delete(msg.tabId);
-      await sendToAllFrames(msg.tabId, { type: 'CAPTURE_STOP' });
+      const cTabId = msg.tabId != null ? msg.tabId : sender.tab && sender.tab.id;
+      if (cTabId != null) {
+        captureTabs.delete(cTabId);
+        try {
+          await sendToAllFrames(cTabId, { type: 'CAPTURE_STOP' });
+        } catch (e) {}
+      }
       return true;
     }
     case 'CAPTURE_STATUS': {
@@ -1061,11 +1174,35 @@ async function handleMessage(msg, sender) {
       const preset = await getPresetById(msg.presetId);
       if (!preset) throw new Error('프리셋을 찾을 수 없습니다.');
       const field = { ...msg.field };
-      const fieldIdx = preset.fields.findIndex((f) => f.selector === field.selector);
+      if (isFillFieldType(field.type || 'text')) {
+        field.handEdit = resolveHandEdit({
+          type: field.type || 'text',
+          value: field.value == null ? '' : String(field.value),
+          handEdit: field.handEdit
+        });
+      }
+      if ((field.type || 'text') === 'click') {
+        field.replayBlocked = resolveReplayBlocked(field);
+      }
+      const replaceId = msg.replaceFieldId || field.replaceFieldId;
+      let fieldIdx = -1;
+      if (replaceId) {
+        fieldIdx = preset.fields.findIndex((f) => f && f.id === replaceId);
+      }
+      if (fieldIdx === -1) {
+        fieldIdx = preset.fields.findIndex((f) => f.selector === field.selector);
+      }
       if (fieldIdx === -1) {
         preset.fields.push(field);
       } else {
-        preset.fields[fieldIdx] = field;
+        const prev = preset.fields[fieldIdx];
+        preset.fields[fieldIdx] = {
+          ...prev,
+          ...field,
+          id: prev.id,
+          value: field.value !== undefined ? String(field.value) : prev.value,
+          selector: field.selector || prev.selector
+        };
       }
       preset.updatedAt = Date.now();
       await savePreset(preset);
@@ -1173,21 +1310,7 @@ async function handleMessage(msg, sender) {
       const preset = await getPresetById(msg.presetId);
       if (!preset) throw new Error('프리셋을 찾을 수 없습니다.');
       const events = Array.isArray(msg.events) ? msg.events : [];
-      const fields = [];
-      for (const e of events) {
-        const field = {
-          id: e.id || crypto.randomUUID(),
-          label: e.label || '필드',
-          selector: e.selector,
-          value: e.value ?? '',
-          type: e.type || 'text',
-          delay: e.delay,
-          // 자동 감지된 민감 여부는 마스킹 신호로 보존 (저장 보호는 프리셋 전체 암호화가 담당)
-          sensitive: !!e.sensitive
-        };
-        fields.push(field);
-      }
-      preset.fields = fields;
+      preset.fields = events.map((e) => normalizeRecordEvent(e));
       preset.updatedAt = Date.now();
       await savePreset(preset);
       return preset;
@@ -1208,9 +1331,20 @@ async function handleMessage(msg, sender) {
       if (!matchPresetUrl(preset, tab.url)) {
         throw new Error('현재 페이지가 프리셋 대상 사이트가 아닙니다.');
       }
-      const replayPace = await getReplayPace();
+      const replayPace = resolvePresetPace(preset, await getReplayPace());
       const resp = await sendApplyToFrames(msg.tabId, { type: 'APPLY_PRESET', preset, replayPace });
       return resp && resp.result;
+    }
+    case 'REPLAY_ABORT': {
+      const tabId = msg.tabId != null ? msg.tabId : sender.tab && sender.tab.id;
+      if (tabId != null) {
+        const ctrl = replayAborts.get(tabId);
+        if (ctrl) ctrl.aborted = true;
+        try {
+          await sendToAllFrames(tabId, { type: 'REPLAY_ABORT' });
+        } catch (e) {}
+      }
+      return { aborted: true };
     }
     case 'SETTINGS_GET': {
       return { replayPace: await getReplayPace() };
@@ -1235,10 +1369,16 @@ async function handleMessage(msg, sender) {
       return tab.url || '';
     }
     case 'EXPORT_DATA': {
-      return {
-        presets: await getAllPresets(),
-        groups: await getGroups()
-      };
+      const presets = await getAllPresets();
+      const groups = await getGroups();
+      if (msg.scrub) {
+        return {
+          presets: presets.map(scrubPresetForExport),
+          groups,
+          scrub: true
+        };
+      }
+      return { presets, groups };
     }
     case 'IMPORT_DATA': {
       // background 단 총 메시지 크기 제한 (I9)
@@ -1315,7 +1455,7 @@ async function applyAutoPreset(tabId, url) {
       try {
         const preset = await getPresetById(entry.id);
         if (!preset || isJourneyPreset(preset)) continue;
-        const replayPace = await getReplayPace();
+        const replayPace = resolvePresetPace(preset, await getReplayPace());
         await sendApplyToFrames(tabId, { type: 'APPLY_PRESET', preset, replayPace });
       } catch (e) {
         // 페이지가 아직 스크립트를 로드하지 않았으면 무시

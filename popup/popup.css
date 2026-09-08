@@ -98,10 +98,33 @@ body {
   margin-bottom: 4px;
 }
 
+#ed-pace-row {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+#ed-pace-row .pace-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .pace-label {
   font-size: 12px;
   font-weight: 600;
   color: #374151;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#ed-pace-row .pace-seg {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+#ed-pace-row .pace-btn {
+  font-size: 10px;
+  padding: 4px 6px;
 }
 
 .pace-seg {
@@ -182,11 +205,24 @@ body {
 .preset-actions {
   display: flex;
   gap: 6px;
-  align-items: stretch;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.preset-actions > .btn {
+  flex: none;
+  min-width: 48px;
+  padding: 3px 8px;
+  font-size: 10px;
+  line-height: 1.2;
 }
 
 .preset-actions > .btn-primary {
-  flex: 1;
+  flex: none;
+  min-width: 52px;
+  padding: 4px 12px;
+  font-size: 11px;
+  border-radius: 6px;
 }
 
 .field-selector-toggle {
@@ -274,9 +310,70 @@ body {
 .preset-card {
   background: #fff;
   border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
+  border-radius: 8px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
+
+.preset-card .preset-card-head {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+  gap: 6px;
+}
+
+.preset-card .preset-meta,
+.preset-card .field-copy-toggle,
+.preset-card .field-copy-list {
+  display: none !important;
+}
+
+.preset-card .preset-actions {
+  flex: none;
+  margin-left: auto;
+}
+
+.preset-section {
+  margin: 10px 0 6px;
+}
+
+.preset-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+}
+
+.preset-section-head .section-site {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section-count {
+  background: #e5e7eb;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  color: #4b5563;
+  font-weight: 700;
+}
+
+.preset-section-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 
 .preset-card.is-matching {
@@ -288,8 +385,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 6px;
+  margin-bottom: 3px;
 }
 
 .preset-select {
@@ -312,7 +409,8 @@ body {
 
 .preset-name {
   font-weight: 700;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 .preset-badges {
@@ -343,27 +441,33 @@ body {
 }
 
 .preset-meta {
-  font-size: 11px;
+  font-size: 10px;
   color: #6b7280;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   word-break: break-all;
+  line-height: 1.3;
 }
 
 .preset-actions {
   display: flex;
   gap: 6px;
-  align-items: stretch;
-}
-
-.preset-actions > .btn-primary {
-  flex: 1;
-  padding: 5px 0;
-  font-size: 11px;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .preset-actions > .btn {
-  padding: 5px 0;
-  font-size: 11px;
+  flex: none;
+  min-width: 48px;
+  padding: 3px 8px;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.preset-actions > .btn-primary {
+  flex: none;
+  min-width: 52px;
+  padding: 3px 10px;
+  font-size: 10px;
 }
 
 .empty-state {
@@ -463,9 +567,15 @@ body {
 .field-item {
   background: #fff;
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-bottom: 6px;
+  border-radius: 6px;
+  padding: 4px 6px;
+  margin-bottom: 3px;
+}
+
+.fields-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .field-item-top {
@@ -516,7 +626,9 @@ body {
 
 .field-value-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
 }
 
 .field-value-row input[type="text"],
@@ -624,6 +736,22 @@ body {
 }
 
 .field-sensitive input {
+  width: auto;
+  margin: 0;
+}
+
+.field-hand-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #a16207;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.field-hand-edit input {
   width: auto;
   margin: 0;
 }

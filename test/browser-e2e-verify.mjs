@@ -749,6 +749,72 @@ async function scenarioLUnicode() {
   await popup2.close().catch(() => {});
 }
 
+// ---------- 시나리오 M: 여정 blocked 중단 (verification-gap patch) ----------
+async function scenarioMBlockedJourney() {
+  await formPage.goto(FORM_URL);
+  await formPage.bringToFront();
+  // 결제 버튼 주입 및 클릭 카운터
+  await formPage.evaluate(() => {
+    let btn = document.querySelector('#pay-btn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'pay-btn';
+      btn.textContent = '결제하기';
+      btn.type = 'button';
+      document.querySelector('form')?.appendChild(btn);
+    }
+    btn.__clickCount = 0;
+    btn.addEventListener('click', () => {
+      btn.__clickCount = (btn.__clickCount || 0) + 1;
+    });
+    document.querySelector('form')?.reset();
+  });
+  const popup = await openPopup();
+  // 직접 storage에 여정 프리셋 주입 (text -> blocked click -> text)
+  const dump0 = await getStorage();
+  const preset = {
+    id: 'blocked-journey-' + Date.now(),
+    name: '여정블락',
+    urlPattern: PATTERN,
+    urlPatterns: [PATTERN],
+    startUrl: FORM_URL,
+    replayPace: 'fast',
+    fields: [
+      { id: 'mj1', label: '이름', selector: 'input[name="name"]', value: '차단이름', type: 'text', delay: 0 },
+      { id: 'mj2', label: '결제', selector: '#pay-btn', value: '결제하기', type: 'click', delay: 200, replayBlocked: true },
+      { id: 'mj3', label: '메모', selector: 'textarea[name="memo"]', value: '이후메모', type: 'text', delay: 0 }
+    ],
+    autoApply: false,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  const blob = await encryptSecret(dump0.vault_key_v1, JSON.stringify(preset));
+  await sw.evaluate(async ({ presetId, blob, preset }) => {
+    const data = await chrome.storage.local.get('presets');
+    const index = Array.isArray(data.presets) ? data.presets : [];
+    index.push({ id: preset.id, name: preset.name, urlPattern: preset.urlPattern, urlPatterns: preset.urlPatterns, startUrl: preset.startUrl, autoApply: false, updatedAt: preset.updatedAt, createdAt: preset.createdAt, replayPace: preset.replayPace });
+    await chrome.storage.local.set({ presets: index, ['sec:preset:' + presetId]: blob });
+  }, { presetId: preset.id, blob, preset });
+  await formPage.evaluate(() => document.querySelector('form')?.reset());
+  await popup.close().catch(() => {});
+  const popup2 = await openPopup();
+  await showAllPresets(popup2);
+  await clickCardAct(popup2, '여정블락', 'replay');
+  // blocked 클릭 이후 필드는 미실행, 이전 필드는 채워짐
+  await formPage.waitForFunction(() => document.querySelector('input[name="name"]')?.value === '차단이름', { timeout: 15000 });
+  await sleep(800);
+  const blockedCount = await formPage.evaluate(() => document.querySelector('#pay-btn')?.__clickCount || 0);
+  const memoVal = await formPage.inputValue('textarea[name="memo"]');
+  const nameVal = await formPage.inputValue('input[name="name"]');
+  ok('M1 위험 클릭 전 칸 채움', nameVal === '차단이름', nameVal);
+  ok('M2 위험 클릭 안 함 (blocked)', blockedCount === 0, String(blockedCount));
+  ok('M3 위험 클릭 이후 필드 중단', memoVal === '', 'memo=' + JSON.stringify(memoVal));
+  // blocked 스타일 확인 (fp-blocked-click)
+  const hasBlockedStyle = await formPage.evaluate(() => document.querySelector('#pay-btn')?.classList.contains('fp-blocked-click'));
+  ok('M4 blocked 스타일 fp-blocked-click', hasBlockedStyle === true);
+  await popup2.close().catch(() => {});
+}
+
 // ---------- 시나리오 E: 마이그레이션 ----------
 async function scenarioE() {
   const legacyPreset = {
@@ -883,6 +949,7 @@ async function main() {
     await runScenario('J: iframe src 교체', scenarioJIframeSrcSwap);
     await runScenario('K: 작은 iframe', scenarioKTinyIframe);
     await runScenario('L: 유니코드 값', scenarioLUnicode);
+    await runScenario('M: 여정 blocked 중단', scenarioMBlockedJourney);
     await runScenario('E: 레거시 마이그레이션', scenarioE);
   } finally {
     await context.close().catch(() => {});

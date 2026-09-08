@@ -1,5 +1,42 @@
 # Decisions
 
+## [2026-09-08] 재생중지
+- **D51**: 재생중지(`REPLAY_ABORT`). `background replayAborts Map` + `content replayAbort` 플래그로 `APPLY_PRESET`/`replayJourney`/`replaySequential`을 중간에 중단. `sleep`/`waitForElement`를 abortable하게 변경하고 `REPLAY_ABORT` 메시지로 브로드캐스트. 팝업에 `재생 중지` 버튼(재생 시에만 노출, `isReplaying` 토글) 추가. 그룹 `RUN_ABORT`와 분리. 메타프롬프트: `메타-프롬프트-재생중지.md`.
+
+## [2026-09-08] 최고속도 재생
+- **D50**: 최고속도(`max`) 재생 추가. 녹화 delay(클릭 간격)를 무시하고 즉시 선택 — `paceDelayMs=0`, `afterNav=0`, `tabWait=5s`, `waitEl=1s`. 전역 `ui:replayPace`와 프리셋 `replayPace`에 `max` 허용(`normal`/`fast`/`slow` 유지). UI는 `최고속도` 버튼(전역 4개·편집 5개). 기존 3단계는 그대로, 기록된 느린 클릭도 재생은 최고속으로. 메타프롬프트: `메타-프롬프트-최고속도-재생.md`.
+
+## [2026-09-08] verification-gap 3 patch
+- **D49**: verification-gap 3건 patch. `background.js CAPTURE_SAVE_FIELD` 빈 값 리픽이 `prev.value`를 유지하던 버그를 `value !== undefined ? String(value) : prev.value`로 수정, 빈 값 손댈 칸 갱신 가능. `test:replay`에 리픽 빈 값 handEdit 8건 + scrub 손댈 보존 9건 추가(161→177 PASS), `test:e2e`에 여정 blocked 중단 시나리오 M(결제하기 blocked 시 이후 필드 미실행·fp-blocked-click) 4건 추가(71→75 PASS 예상). 메타프롬프트: `메타-프롬프트-verification-gap-3패치.md`.
+
+## [2026-09-05] 채움 초안 CAP-4~7 (스토리 2~6)
+- **D44**: 위험 클릭 재생 금지(CAP-4, R20). 기본 10단어(상신·결재·결제·결제하기·구매하기·전송·송금·이체·Pay·Purchase)는 보이는 글자가 같거나 그 단어로 끝날 때(대소문자 무시). `제출/확인/저장/다음/검색`은 기본 금지 아님(오차단 방지). 판정은 클릭 타입만 `replayBlocked:boolean`을 blob 안에 저장, 평문 인덱스엔 없음. 재생은 클릭을 누르지 않고 `blocked:true`로 중단, 토스트 `직접 누르기`. 그룹 auto 제출도 blocked면 `waiting`으로 사람 대기. 사이트 셀렉터 하드코딩 금지. 메타프롬프트: `메타-프롬프트-채움초안-스토리2-6.md`.
+- **D45**: 파일 첨부 칸에서 멈춤(CAP-6, R21). `input[type=file]` 값은 확장이 채우지 못하므로 값 시도를 하지 않고 `fp-file-stop` 점선과 `fileStop:true`로 안내. 실패가 아니므로 재시도를 트리거하지 않고 이후 필드는 이어서 진행. 여정·그룹 모두. 메타프롬프트: `메타-프롬프트-채움초안-스토리2-6.md`.
+- **D46**: 프리셋별 재생 속도(CAP-5, R22). 전역 `ui:replayPace`는 유지, `preset.replayPace='fast'|'normal'|'slow'|''`가 있으면 덮음(빈 값이면 전역 따름). 사이트 도메인 하드코딩 없음. 기획서 7.2 P1 후보를 P0로 격상. 메타프롬프트: `메타-프롬프트-채움초안-스토리2-6.md`.
+- **D47**: 깨진 칸만 다시 찍기(CAP-3, R23). 전체 재녹화 없이 그 필드만 갱신. 기존 캡처 모드를 재사용: 편집 `다시 찍기` → `CAPTURE_START {replaceFieldId}` → `CAPTURE_SAVE_FIELD`에서 `findIndex(f.id===replaceId)`로 찾아 `id` 유지·`selector`/`value` 갱신. 여정 중간 실패 후에도 한 칸 리픽으로 재녹화 없이 재생. 메타프롬프트: `메타-프롬프트-채움초안-스토리2-6.md`.
+- **D48**: 값 없는 스크럽 내보내기(CAP-7, R24). `EXPORT_DATA {scrub:true}`는 `fields[].value=''`인 딥카피 사본, 손댈 칸·금지 클릭·속도 표시는 남김. 프리셋+그룹 함께 내보냄. 기존 실값 경로는 유지(별 동작·별 파일명 `presets-scrub-*.json`). 가져오기는 새 ID·기존 유지·스키마 상한 R5 동일. 메타프롬프트: `메타-프롬프트-채움초안-스토리2-6.md`.
+
+## [2026-09-05] 손댈 칸 / 나중에 입력
+- **D43**: 채움 초안 스토리 1. 채움 타입 저장 값이 비면 `handEdit` 손댈 칸. 재생은 덮지 않고 노란 `fp-hand-edit`를 input/change까지 유지. 편집에서 켜고 끌 수 있음. 녹화 중 별 버튼 없음. `click`/`keydown`/`navigate`는 손댈 칸 아님. 누락은 요소를 못 찾은 경우만. 플래그는 blob 안만 (R6). 레거시는 키 없음+빈 값을 읽기 때 손댈 칸으로, blob 일괄 재기록 없음. 메타프롬프트: `메타-프롬프트-손댈칸-나중에입력.md`.
+
+## [2026-09-05] BMAD brainstorming 유지
+- **D42**: 사용자("bmad branstorm 스킬은 냅둘것"). D41에서 지운 `bmad-brainstorming`을 복원. 유지 세트: help / brainstorming / spec / build. 제품 런타임 변경 없음. 메타프롬프트: `메타-프롬프트-BMAD-브레인스토밍-유지.md`.
+
+## [2026-09-05] BMAD 스킬 축소 (기획+구현만)
+- **D41**: 사용자("bmad로 기획 간단한 구현 정도만 할건데 불필요한 bmad스킬삭제"). Grok 스킬은 `bmad-help` / `bmad-spec` / `bmad-build`만 남김. PRD·UX·아키텍처·에픽·스프린트·페르소나·party·review 등 26개 삭제. help 카탈로그도 동일하게 줄임. 제품 런타임 변경 없음. 설치기를 다시 돌리면 복원됨. 메타프롬프트: `메타-프롬프트-BMAD-스킬-축소.md`.
+
+## [2026-09-05] BMAD Method 설치
+- **D40**: 사용자("bmad 설치"). `npx bmad-method install`로 BMM v6.12.0 + Grok 도구(29 스킬 → `.agents/skills`). 대화/문서 언어 Korean, 산출물 `_bmad-output`(gitignore). 제품 런타임·R1~R18 변경 없음. 기존 `AGENTS.md` 메타프롬프트 규칙은 유지하고 BMAD보다 우선. 장기 지식 경로는 제품 `docs/`와 겹치지 않게 `_bmad-output/project-knowledge`. 메타프롬프트: `메타-프롬프트-BMAD-설치.md`.
+
+## [2026-09-05] 소스 기준 문서 최신화
+- **D39**: 사용자("소스를 기반으로 문서를 최신화 할것"). 런타임 코드는 바꾸지 않고 REQUIREMENTS·기획서·README·유즈케이스·QA·AGENTS를 소스와 맞춤. 반영: 테스트 수(encrypt 13 / pii 30 / replay 99 / qa 22 / e2e 71 A~L), 저장 키(`recordSessions` v2, `ui:replayPace`, `ui:filterCurrentSite`), 상한(필드 500·값 64KB), R3-4 15초 재시도, R11-10 같은 페이지 모달, R17 속도 상수, R18-4 칩 240×160, 유즈케이스 iframe “구멍” 정정. 메타프롬프트: `메타-프롬프트-소스기준-문서최신화.md`.
+
+## [2026-08-30] 사내 테스트 기안 승인
+- **D38**: 사용자("승인"). 기안 `docs/기안-사내테스트-다시하기.md` §11 네 항목과 기획팅 K1~K9를 승인. 사내 테스트 한정 개발·소수 파일럿. 웹스토어·전사 필수·운영 사용·서버 공유는 불허. 파일럿 수칙이 사용 조건. 범위 확대는 별도 기안. 코드 변경 없음. 메타프롬프트: `메타-프롬프트-사내테스트-기안-승인.md`.
+
+## [2026-08-30] 사내 테스트 한정 개발 기안
+- **D37**: 사용자("사내 테스트 용도 한정으로이 플러그인을 디벨롭 하는 기안을 기획팅으로 회의후 기획서 작성"). 기획팅 회의록 `docs/기획팅-2026-08-30-사내테스트-기안.md`, 기안 `docs/기안-사내테스트-다시하기.md`. 기존 제품 기획서 `기획서.md`는 유지(역할 분리). 코드·스키마 변경 없음. 범위: 스테이징·폐쇄망·로컬 파일럿만. 웹스토어·전사 필수·운영 사용·서버 동기화는 기안 Out. 메타프롬프트: `메타-프롬프트-사내테스트-기안-기획서.md`.
+
 ## [2026-08-30] QA 엣지케이스 도출·실행
 - **D36**: 사용자("QA 팀으로 엣지케이스 테스트 케이스를 도출하고 QA진행"). 5역할 카탈로그는 `QA-엣지케이스.md`. 빈틈은 `npm run test:qa`(22)와 E2E I 중첩 iframe / J src 교체 / K 작은 iframe / L 유니코드로 실행. e2e **71/71**. 파일 input·sandbox iframe은 한계로 남김. 메타프롬프트: `메타-프롬프트-QA-엣지케이스-진행.md`.
 

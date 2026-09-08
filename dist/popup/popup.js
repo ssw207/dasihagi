@@ -37,6 +37,32 @@
     toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2500);
   }
 
+  function isFillFieldType(type) {
+    return type === 'text' || type === 'textarea' || type === 'select' || type === 'checkbox' || type === 'radio';
+  }
+
+  function isHandEditField(field) {
+    if (!field || !isFillFieldType(field.type)) return false;
+    if (typeof field.handEdit === 'boolean') return field.handEdit;
+    return String(field.value == null ? '' : field.value) === '';
+  }
+
+  function formatReplayToast(result) {
+    const applied = result.applied || [];
+    const hand = applied.filter((a) => a && a.handEdit);
+    const blocked = applied.filter((a) => a && a.blocked);
+    const fileStop = applied.filter((a) => a && a.fileStop);
+    const filled = applied.length - hand.length - blocked.length - fileStop.length;
+    const missed = (result.failures || []).length;
+    const labels = hand.map((a) => a.label).filter(Boolean);
+    let text = '재생 완료: 채움 ' + filled + '개, 손댈 칸 ' + hand.length + '개';
+    if (labels.length) text += ' (' + labels.join(', ') + ')';
+    if (blocked.length) text += ', 직접 누르기 ' + blocked.length + '개';
+    if (fileStop.length) text += ', 직접 첨부 ' + fileStop.length + '개';
+    text += ', 누락 ' + missed + '개';
+    return text;
+  }
+
   async function copyToClipboard(text, isSensitive) {
     let ok = false;
     try {
@@ -109,7 +135,7 @@
     }
     $('#site-chip').textContent = currentHost || '알 수 없는 사이트';
     const blocked = isRestrictedPage();
-    ['#btn-record-site', '#btn-record-site-empty', '#btn-record-site-filter'].forEach((sel) => {
+    ['#btn-record-site', '#btn-record-site-empty', '#btn-record-site-filter', '#btn-new-capture-preset'].forEach((sel) => {
       const el = $(sel);
       if (el) el.disabled = blocked;
     });
@@ -141,10 +167,20 @@
     });
   }
 
+  let isReplaying = false;
+  function setReplaying(on) {
+    isReplaying = !!on;
+    const wrap = $('#replay-stop-wrap');
+    if (wrap) wrap.classList.toggle('hidden', !isReplaying);
+    document.querySelectorAll('[data-act="replay"]').forEach((b) => {
+      b.disabled = isReplaying;
+    });
+  }
+
   async function loadReplayPace() {
     const resp = await sendMessage({ type: 'SETTINGS_GET' });
     const pace = resp.ok && resp.data ? resp.data.replayPace : 'normal';
-    paintPaceButtons(pace === 'fast' || pace === 'slow' ? pace : 'normal');
+    paintPaceButtons(pace === 'fast' || pace === 'slow' || pace === 'max' ? pace : 'normal');
   }
 
   async function refreshRecordBanner() {
@@ -191,6 +227,32 @@
     showToast('녹화 시작! 페이지에서 평소대로 한 뒤 [종료]를 누르세요.');
     await loadPresets();
     await refreshRecordBanner();
+  }
+
+  async function startCaptureNewPreset() {
+    if (isRestrictedPage()) {
+      showToast('이 페이지에서는 캡처할 수 없습니다.');
+      return;
+    }
+    const host = currentHost || '새 프리셋';
+    const pattern = currentPort ? currentHost + ':' + currentPort : currentHost;
+    const created = await sendMessage({
+      type: 'PRESET_CREATE',
+      name: host,
+      urlPattern: pattern || '',
+      urlPatterns: pattern ? [pattern] : []
+    });
+    if (!created.ok || !created.data) {
+      showToast('프리셋 생성 실패: ' + (created.error || ''));
+      return;
+    }
+    const resp = await sendMessage({ type: 'CAPTURE_START', tabId: currentTabId, presetId: created.data.id });
+    if (!resp.ok) {
+      showToast('캡처 실패: ' + resp.error);
+      return;
+    }
+    showToast('캡처 모드 시작! 페이지에서 입력란을 클릭하세요.');
+    window.close();
   }
 
   function isJourneyPreset(preset) {
@@ -379,7 +441,6 @@
 
   function buildFieldCopyRows(fields) {
     if (!Array.isArray(fields) || fields.length === 0) return '';
-    const MAX_VISIBLE = 5;
     const rows = fields
       .map((field, idx) => {
         if (!field || typeof field !== 'object') return '';
@@ -392,6 +453,9 @@
         if (field.type === 'click') displayValue = '클릭 · ' + (field.value || field.label || '요소');
         else if (field.type === 'keydown') displayValue = '키 · ' + (field.value || 'Enter');
         else displayValue = '이동 · ' + (field.value || field.label || '');
+        copyValue = String(field.value || '');
+      } else if (isHandEditField(field)) {
+        displayValue = '나중에 입력';
         copyValue = String(field.value || '');
       } else if (isBoolean) {
         const checked = field.value === 'true';
@@ -418,16 +482,7 @@
       })
       .filter((row) => row !== '');
 
-    const visible = rows.slice(0, MAX_VISIBLE).join('');
-    const hidden = rows.slice(MAX_VISIBLE);
-    let html = '<div class="field-copy-list">' + visible;
-    if (hidden.length > 0) {
-      html +=
-        '<div class="field-copy-more hidden" data-more-fields>' + hidden.join('') + '</div>' +
-        '<button class="field-copy-toggle" data-toggle-fields>' + hidden.length + '개 더보기</button>';
-    }
-    html += '</div>';
-    return html;
+    return '<button class="field-copy-toggle" data-toggle-fields>세부 필드 보기 (' + rows.length + '개)</button><div class="field-copy-list hidden" data-fields-list>' + rows.join('') + '</div>';
   }
 
   function updateSelectBar() {
@@ -453,6 +508,19 @@
     }
   }
 
+  function siteKeyForPreset(preset) {
+    const patterns = getPresetPatterns(preset);
+    const first = patterns[0] || '';
+    if (!first) return '(패턴 없음)';
+    let p = String(first).trim().replace(/^[a-z]+:\/\//i, '');
+    p = p.split('?')[0].split('#')[0];
+    const slashIdx = p.indexOf('/');
+    let host = slashIdx === -1 ? p : p.slice(0, slashIdx);
+    host = host.trim();
+    if (!host) return '(패턴 없음)';
+    return host.toLowerCase();
+  }
+
   function renderList() {
     presetList.innerHTML = '';
     const shown = visiblePresets();
@@ -465,7 +533,23 @@
       return;
     }
 
+    const grouped = new Map();
     for (const preset of shown) {
+      const key = siteKeyForPreset(preset);
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(preset);
+    }
+
+    for (const [site, items] of grouped) {
+      const section = document.createElement('div');
+      section.className = 'preset-section';
+      section.innerHTML = '<div class="preset-section-head"><span class="section-site">' + escapeHtml(site) + '</span><span class="badge section-count">' + items.length + '개</span></div>';
+      const sectionList = document.createElement('div');
+      sectionList.className = 'preset-section-list';
+      section.appendChild(sectionList);
+      presetList.appendChild(section);
+
+      for (const preset of items) {
       const card = document.createElement('div');
       card.className = 'preset-card' + (presetMatchesCurrent(preset) ? ' is-matching' : '');
 
@@ -474,6 +558,9 @@
       if (isJourneyPreset(preset)) badges.push('<span class="badge badge-journey">여정</span>');
       if (preset.autoApply && !isJourneyPreset(preset)) badges.push('<span class="badge badge-auto">자동 적용</span>');
 
+      const isJourney = isJourneyPreset(preset);
+      const mainAct = isJourney ? 'replay' : 'apply';
+      const mainLabel = isJourney ? '재생' : '세팅';
       card.innerHTML =
         '<div class="preset-card-head">' +
         '<label class="preset-select">' +
@@ -487,11 +574,12 @@
         '<div class="preset-meta">' + escapeHtml(formatPatternMeta(preset)) + ' · 필드 ' + (Array.isArray(preset.fields) ? preset.fields.length : 0) + '개</div>' +
         buildFieldCopyRows(preset.fields) +
         '<div class="preset-actions">' +
-        '<button class="btn btn-primary" data-act="replay" data-id="' + escapeHtml(preset.id) + '">재생</button>' +
+        '<button class="btn btn-primary" data-act="' + mainAct + '" data-id="' + escapeHtml(preset.id) + '">' + mainLabel + '</button>' +
         '<div class="card-more">' +
         '<button type="button" class="btn" data-menu-toggle aria-label="더보기">⋯</button>' +
         '<div class="menu hidden">' +
         '<button type="button" class="menu-item" data-act="record" data-id="' + escapeHtml(preset.id) + '">녹화</button>' +
+        '<button type="button" class="menu-item" data-act="capture" data-id="' + escapeHtml(preset.id) + '">캡처</button>' +
         '<button type="button" class="menu-item" data-act="edit" data-id="' + escapeHtml(preset.id) + '">편집</button>' +
         '<button type="button" class="menu-item" data-act="delete" data-id="' + escapeHtml(preset.id) + '">삭제</button>' +
         '</div>' +
@@ -535,15 +623,15 @@
       });
       const toggleBtn = card.querySelector('[data-toggle-fields]');
       if (toggleBtn) {
+        const list = card.querySelector('[data-fields-list]');
+        const total = list ? list.querySelectorAll('.field-copy-row').length : 0;
         toggleBtn.addEventListener('click', () => {
-          const more = card.querySelector('[data-more-fields]');
-          const isCollapsed = more.classList.toggle('hidden');
-          toggleBtn.textContent = isCollapsed
-            ? more.querySelectorAll('.field-copy-row').length + '개 더보기'
-            : '접기';
+          const isCollapsed = list.classList.toggle('hidden');
+          toggleBtn.textContent = isCollapsed ? '세부 필드 보기 (' + total + '개)' : '접기';
         });
       }
-      presetList.appendChild(card);
+      sectionList.appendChild(card);
+    }
     }
     updateSelectBar();
   }
@@ -586,15 +674,20 @@
 
   async function handlePresetAction(act, preset) {
     if (act === 'apply' || act === 'replay') {
+      const isJourney = isJourneyPreset(preset);
+      if (isJourney) setReplaying(true);
       const resp = await sendMessage({ type: 'APPLY_PRESET', presetId: preset.id, tabId: currentTabId });
+      if (isJourney) setReplaying(false);
       if (!resp.ok) {
-        showToast('재생 실패: ' + resp.error);
+        showToast((isJourney ? '재생' : '세팅') + ' 실패: ' + resp.error);
         return;
       }
       const result = resp.data || {};
-      const failed = (result.failures || []).length;
-      const applied = (result.applied || []).length;
-      showToast('재생 완료: ' + applied + '개, 실패: ' + failed + '개');
+      if (result && result.aborted) {
+        showToast((isJourney ? '재생' : '세팅') + '을 중지했습니다.');
+        return;
+      }
+      showToast(formatReplayToast(result));
     } else if (act === 'capture') {
       const resp = await sendMessage({ type: 'CAPTURE_START', tabId: currentTabId, presetId: preset.id });
       if (!resp.ok) {
@@ -676,6 +769,10 @@
     autoEl.title = journey ? '여정 프리셋은 페이지 진입 시 자동 적용하지 않습니다.' : '';
     const autoHint = $('#ed-autoapply-hint');
     if (autoHint) autoHint.classList.toggle('hidden', !journey);
+    const wantPace = editingPreset.replayPace === 'fast' || editingPreset.replayPace === 'slow' || editingPreset.replayPace === 'normal' || editingPreset.replayPace === 'max' ? editingPreset.replayPace : '';
+    document.querySelectorAll('#ed-pace-row .pace-btn').forEach((btn) => {
+      btn.classList.toggle('is-on', (btn.dataset.edPace || '') === wantPace);
+    });
     $('#btn-delete-preset').style.display = preset ? '' : 'none';
     $('#btn-capture').disabled = !preset;
     $('#btn-record').disabled = !preset;
@@ -683,16 +780,32 @@
   }
 
   function renderFields() {
-    const fields = Array.isArray(editingPreset.fields) ? editingPreset.fields : [];
+    const allFields = Array.isArray(editingPreset.fields) ? editingPreset.fields : [];
+    const searchEl = document.getElementById('field-search');
+    const q = (searchEl && searchEl.value || '').toLowerCase().trim();
+    const entries = allFields.map((f,i)=>({f,i})).filter((e)=> !q || !e.f || typeof e.f !== 'object' ? false : (String(e.f.label||'').toLowerCase().includes(q) || String(e.f.value||'').toLowerCase().includes(q) || String(e.f.type||'').toLowerCase().includes(q)));
+    const fields = q ? entries.map(e=>e.f) : allFields;
+    const filteredEntries = q ? entries : allFields.map((f,i)=>({f,i}));
+    if (searchEl) searchEl.style.display = allFields.length > 5 ? '' : 'none';
     fieldsList.innerHTML = '';
-    fieldsEmpty.classList.toggle('hidden', fields.length > 0);
-    $('#field-count').textContent = fields.length;
-    fields.forEach((field, idx) => {
+    const isFiltered = q && filteredEntries.length !== allFields.length;
+    fieldsEmpty.classList.toggle('hidden', filteredEntries.length > 0 || isFiltered);
+    if (isFiltered && filteredEntries.length === 0) {
+      fieldsEmpty.textContent = '검색 결과 없음';
+      fieldsEmpty.classList.remove('hidden');
+    } else if (!isFiltered) {
+      fieldsEmpty.textContent = '아직 저장된 필드가 없습니다.';
+    }
+    const countEl = document.getElementById('field-count');
+    if (countEl) countEl.textContent = isFiltered ? filteredEntries.length + '/' + allFields.length : allFields.length;
+    filteredEntries.forEach(({f: field, i: idx}) => {
       if (!field || typeof field !== 'object') return;
       const item = document.createElement('div');
       item.className = 'field-item';
       const isBoolean = field.type === 'checkbox' || field.type === 'radio';
       const isSensitive = !!field.sensitive;
+      const isFill = isFillFieldType(field.type);
+      const isHandEdit = isHandEditField(field);
       item.innerHTML =
         '<div class="field-item-top">' +
         '<input type="text" class="field-label-input" data-idx="' + idx + '" value="' + escapeHtml(field.label || '') + '" data-label-edit placeholder="표시 이름" maxlength="80" aria-label="표시 이름">' +
@@ -720,6 +833,13 @@
           ? ''
           : '<button class="field-copy-btn" data-edit-copy="' + idx + '" title="값 복사"' + (field.value === '' ? ' disabled' : '') + '>📋</button>') +
         '<label class="field-sensitive"><input type="checkbox" data-sensitive="' + idx + '"' + (isSensitive ? ' checked' : '') + '>민감</label>' +
+        (isFill
+          ? '<label class="field-hand-edit"><input type="checkbox" data-hand-edit="' + idx + '"' + (isHandEdit ? ' checked' : '') + '>손댈 칸</label>'
+          : '') +
+        (field.type === 'click'
+          ? '<label class="field-hand-edit"><input type="checkbox" data-replay-blocked="' + idx + '"' + (field.replayBlocked ? ' checked' : '') + '>재생 금지</label>'
+          : '') +
+        '<button type="button" class="btn btn-small" data-repick="' + idx + '">다시 찍기</button>' +
         '<button class="field-del" data-del="' + idx + '" title="삭제">✕</button>' +
         '</div>';
       item.querySelector('[data-del]').addEventListener('click', () => {
@@ -740,6 +860,36 @@
           editingPreset.fields[idx].sensitive = e.target.checked;
           const input = item.querySelector('[data-value-edit]');
           if (input) input.type = e.target.checked ? 'password' : 'text';
+        });
+      }
+      const handEditCheck = item.querySelector('[data-hand-edit]');
+      if (handEditCheck) {
+        handEditCheck.addEventListener('change', (e) => {
+          editingPreset.fields[idx].handEdit = e.target.checked;
+        });
+      }
+      const blockedCheck = item.querySelector('[data-replay-blocked]');
+      if (blockedCheck) {
+        blockedCheck.addEventListener('change', (e) => {
+          editingPreset.fields[idx].replayBlocked = e.target.checked;
+        });
+      }
+      const repickBtn = item.querySelector('[data-repick]');
+      if (repickBtn) {
+        repickBtn.addEventListener('click', async () => {
+          const f = editingPreset.fields[idx];
+          if (!f || !editingPreset.id) return;
+          const resp = await sendMessage({
+            type: 'CAPTURE_START',
+            tabId: currentTabId,
+            presetId: editingPreset.id,
+            replaceFieldId: f.id
+          });
+          if (!resp.ok) {
+            showToast('다시 찍기 실패: ' + (resp.error || ''));
+            return;
+          }
+          showToast('페이지에서 칸을 클릭하면 이 필드만 다시 지정합니다.');
         });
       }
       const editCopyBtn = item.querySelector('[data-edit-copy]');
@@ -766,6 +916,15 @@
     const copyBtn = fieldsList.querySelector('[data-edit-copy="' + idx + '"]');
     if (copyBtn) copyBtn.disabled = e.target.value === '';
   });
+
+  const fieldSearchEl = document.getElementById('field-search');
+  if (fieldSearchEl) {
+    let searchTimer = null;
+    fieldSearchEl.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => renderFields(), 150);
+    });
+  }
 
   function normalizeFieldLabels(fields) {
     if (!Array.isArray(fields)) return;
@@ -873,7 +1032,8 @@
     renderSteps();
   });
 
-  $('#btn-new-preset').addEventListener('click', () => openEditor(null));
+  const btnNewCapture = $('#btn-new-capture-preset');
+  if (btnNewCapture) btnNewCapture.addEventListener('click', startCaptureNewPreset);
   ['#btn-record-site', '#btn-record-site-empty', '#btn-record-site-filter'].forEach((sel) => {
     const el = $(sel);
     if (el) el.addEventListener('click', startRecordThisSite);
@@ -901,7 +1061,7 @@
       renderList();
     });
   }
-  document.querySelectorAll('.pace-btn').forEach((btn) => {
+  document.querySelectorAll('.pace-btn[data-pace]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const pace = btn.dataset.pace;
       const resp = await sendMessage({ type: 'SETTINGS_SET', replayPace: pace });
@@ -911,10 +1071,18 @@
       }
       paintPaceButtons(resp.data && resp.data.replayPace ? resp.data.replayPace : pace);
       showToast(
-        pace === 'fast' ? '재생 속도: 빠름 (이동 후 대기 거의 없음)' : pace === 'slow' ? '재생 속도: 느림' : '재생 속도: 보통'
+        pace === 'max' ? '재생 속도: 최고속도 (대기 없음)' : pace === 'fast' ? '재생 속도: 빠름 (이동 후 대기 거의 없음)' : pace === 'slow' ? '재생 속도: 느림' : '재생 속도: 보통'
       );
     });
   });
+  const stopReplayBtn = $('#btn-stop-replay');
+  if (stopReplayBtn) {
+    stopReplayBtn.addEventListener('click', async () => {
+      await sendMessage({ type: 'REPLAY_ABORT', tabId: currentTabId });
+      setReplaying(false);
+      showToast('재생을 중지했습니다.');
+    });
+  }
   document.addEventListener('click', () => closeAllMenus());
   const stopRecordBtn = $('#btn-stop-record');
   if (stopRecordBtn) {
@@ -968,8 +1136,15 @@
   });
   $('#btn-new-group').addEventListener('click', () => openGroupEditor(null));
 
-  $('#btn-export').addEventListener('click', async () => {
-    const resp = await sendMessage({ type: 'EXPORT_DATA' });
+  document.querySelectorAll('#ed-pace-row .pace-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#ed-pace-row .pace-btn').forEach((b) => b.classList.remove('is-on'));
+      btn.classList.add('is-on');
+    });
+  });
+
+  async function downloadExport(scrub) {
+    const resp = await sendMessage({ type: 'EXPORT_DATA', scrub: !!scrub });
     if (!resp.ok) {
       showToast('내보내기 실패: ' + resp.error);
       return;
@@ -981,7 +1156,6 @@
       showToast('내보낼 데이터가 없습니다.');
       return;
     }
-
     const payload = {
       schemaVersion: 1,
       appId: 'dasihagi',
@@ -989,17 +1163,22 @@
       presets,
       groups
     };
+    if (scrub) payload.scrub = true;
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const now = new Date();
     const dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'presets-' + dateStr + '.json';
+    a.download = (scrub ? 'presets-scrub-' : 'presets-') + dateStr + '.json';
     a.click();
     URL.revokeObjectURL(url);
-    showToast('내보내기 완료: 프리셋 ' + presets.length + '개, 그룹 ' + groups.length + '개');
-  });
+    showToast((scrub ? '값 없이 내보내기 완료: ' : '내보내기 완료: ') + '프리셋 ' + presets.length + '개, 그룹 ' + groups.length + '개');
+  }
+
+  $('#btn-export').addEventListener('click', () => downloadExport(false));
+  const exportScrubBtn = $('#btn-export-scrub');
+  if (exportScrubBtn) exportScrubBtn.addEventListener('click', () => downloadExport(true));
 
   $('#btn-import').addEventListener('click', () => {
     $('#import-file').click();
@@ -1064,8 +1243,11 @@
 
   $('#btn-save-preset').addEventListener('click', async () => {
     const btn = $('#btn-save-preset');
-    if (btn.disabled) return; // 저장 중 연타 방지 (UX-4)
+    if (btn.disabled) return;
     btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = '저장 중...';
+    showToast('저장 중...');
     try {
       const name = $('#ed-name').value.trim();
       const patterns = parsePatternText($('#ed-pattern').value);
@@ -1081,6 +1263,9 @@
       editingPreset.urlPatterns = patterns;
       editingPreset.urlPattern = patterns[0];
       editingPreset.autoApply = isJourneyPreset(editingPreset) ? false : $('#ed-autoapply').checked;
+      const paceBtn = document.querySelector('#ed-pace-row .pace-btn.is-on');
+      const paceVal = paceBtn && paceBtn.dataset.edPace;
+      editingPreset.replayPace = paceVal === 'fast' || paceVal === 'slow' || paceVal === 'normal' || paceVal === 'max' ? paceVal : '';
       normalizeFieldLabels(editingPreset.fields);
 
       let resp;
@@ -1103,11 +1288,18 @@
         showToast('저장 실패: ' + resp.error);
         return;
       }
+      const saved = resp.data || editingPreset;
+      const idx = presets.findIndex((p) => p.id === saved.id);
+      if (idx !== -1) presets[idx] = { ...saved };
+      else presets.push({ ...saved });
       showToast('저장되었습니다.');
-      renderFields();
-      $('#btn-capture').disabled = false;
-      $('#btn-record').disabled = false;
+      editorView.classList.add('hidden');
+      listView.classList.remove('hidden');
+      renderList();
+      if (window.requestIdleCallback) requestIdleCallback(() => loadPresets(), { timeout: 2000 });
+      else setTimeout(() => loadPresets(), 500);
     } finally {
+      btn.textContent = origText;
       btn.disabled = false;
     }
   });

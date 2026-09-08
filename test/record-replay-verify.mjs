@@ -116,6 +116,12 @@ class MockElement {
   addEventListener(type, fn) {
     (this.eventListeners[type] = this.eventListeners[type] || []).push(fn);
   }
+  removeEventListener(type, fn) {
+    const list = this.eventListeners[type];
+    if (!list) return;
+    const idx = list.indexOf(fn);
+    if (idx !== -1) list.splice(idx, 1);
+  }
   dispatchEvent(ev) {
     const fns = this.eventListeners[ev.type] || [];
     fns.forEach((fn) => fn.call(this, ev));
@@ -577,6 +583,12 @@ agreeCheck.setAttribute('id', 'agree');
 agreeCheck.setAttribute('name', 'agree');
 agreeCheck.setAttribute('aria-label', '약관 동의');
 agreeCheck.type = 'checkbox';
+const bizInput = document.createElement('input');
+bizInput.setAttribute('id', 'biz-no');
+bizInput.setAttribute('name', 'biz_no');
+bizInput.setAttribute('placeholder', '사업자번호');
+bizInput.type = 'text';
+bizInput._value = '';
 
 const searchBtn = document.createElement('button');
 searchBtn.setAttribute('id', 'search-btn');
@@ -591,8 +603,24 @@ form.appendChild(nameInput);
 form.appendChild(emailInput);
 form.appendChild(deptSelect);
 form.appendChild(agreeCheck);
+form.appendChild(bizInput);
+const payBtn = document.createElement('button');
+payBtn.setAttribute('id', 'pay-btn');
+payBtn.setAttribute('type', 'button');
+payBtn.textContent = '결제하기';
+payBtn.clickCount = 0;
+payBtn.addEventListener('click', () => {
+  payBtn.clickCount += 1;
+});
+const fileInput = document.createElement('input');
+fileInput.setAttribute('id', 'attach');
+fileInput.setAttribute('name', 'attach');
+fileInput.type = 'file';
+fileInput._value = '';
 form.appendChild(searchBtn);
 form.appendChild(moreLink);
+form.appendChild(payBtn);
+form.appendChild(fileInput);
 document.body.appendChild(form);
 
 // ============================================================
@@ -1088,6 +1116,433 @@ const fastMs = Date.now() - tFast;
 check('빠름 재생 ok', !!paceReplay.ok, true);
 check('빠름이면 이동 후 대기가 짧음', fastMs < 1200, true);
 await callBackground({ type: 'SETTINGS_SET', replayPace: 'normal' });
+
+console.log('\n[손댈 칸 / 나중에 입력]');
+const createdHand = await callBackground({ type: 'PRESET_CREATE', name: '손댈칸', urlPattern: 'example.com' });
+const handId = createdHand.data.id;
+mockTabUrl = 'https://example.com/form';
+globalThis.location.href = mockTabUrl;
+await callBackground({ type: 'RECORD_START', presetId: handId, tabId: 1 });
+nameInput._value = '고정이름';
+document.dispatchSyntheticEvent('input', nameInput);
+await sleep(450);
+bizInput._value = '';
+document.dispatchSyntheticEvent('input', bizInput);
+await sleep(450);
+await callBackground({ type: 'RECORD_STOP', presetId: handId, tabId: 1 });
+const listHand = await callBackground({ type: 'PRESET_LIST' });
+const handPreset = listHand.data.find((p) => p.id === handId);
+const handBySel = {};
+for (const f of handPreset.fields || []) handBySel[f.selector] = f;
+check('빈 값 녹화 handEdit', !!(handBySel['#biz-no'] && handBySel['#biz-no'].handEdit), true);
+check('값 있는 칸은 handEdit 아님', !handBySel['#user-name'].handEdit, true);
+const indexHand = storageLocal.dump().presets.find((p) => p.id === handId);
+check('인덱스에 fields 없음', !Array.isArray(indexHand.fields), true);
+check('인덱스에 handEdit 없음', jsonHas(indexHand, 'handEdit'), false);
+nameInput._value = '';
+bizInput._value = '페이지사업자';
+bizInput.classList.remove('fp-hand-edit');
+const handReplay = await callBackground({ type: 'APPLY_PRESET', presetId: handId, tabId: 1 });
+const handRes = handReplay.data || {};
+const handApplied = handRes.applied || [];
+check('손댈 칸 재생 실패 0', (handRes.failures || []).length, 0);
+check('손댈 칸 applied 플래그', handApplied.some((a) => a.handEdit && a.label === handBySel['#biz-no'].label), true);
+check('고정 칸은 채움', nameInput._value, '고정이름');
+check('손댈 칸 값 유지', bizInput._value, '페이지사업자');
+check('손댈 칸 노란 표시', bizInput.classList.contains('fp-hand-edit'), true);
+check('채움 칸은 노란 표시 아님', nameInput.classList.contains('fp-hand-edit'), false);
+
+const createdLegacy = await callBackground({ type: 'PRESET_CREATE', name: '레거시빈값', urlPattern: 'example.com' });
+const legacyId = createdLegacy.data.id;
+const blobBeforeUpdate = storageLocal.dump()['sec:preset:' + legacyId];
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: legacyId,
+    name: '레거시빈값',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    fields: [{ id: 'leg1', label: '사업자', selector: '#biz-no', value: '', type: 'text' }]
+  }
+});
+const storedLegacy = storageLocal.dump();
+const legacyIndex = storedLegacy.presets.find((p) => p.id === legacyId);
+check('레거시 인덱스 필드 없음', !Array.isArray(legacyIndex.fields), true);
+const listLegacy = await callBackground({ type: 'PRESET_LIST' });
+const emptyLegacy = listLegacy.data.find((p) => p.id === legacyId);
+check('레거시 빈 값 읽기 handEdit', !!(emptyLegacy.fields[0] && emptyLegacy.fields[0].handEdit), true);
+const blobAfterList = storageLocal.dump()['sec:preset:' + legacyId];
+check('읽기 후 blob 재기록 없음', JSON.stringify(blobAfterList), JSON.stringify(storedLegacy['sec:preset:' + legacyId]));
+void blobBeforeUpdate;
+
+bizInput._value = '레거시유지';
+bizInput.classList.remove('fp-hand-edit');
+const legacyReplay = await callBackground({ type: 'APPLY_PRESET', presetId: legacyId, tabId: 1 });
+check('레거시 재생 실패 0', (legacyReplay.data.failures || []).length, 0);
+check('레거시 재생 값 안 넣음', bizInput._value, '레거시유지');
+check('레거시 노란 표시', bizInput.classList.contains('fp-hand-edit'), true);
+
+const createdFlag = await callBackground({ type: 'PRESET_CREATE', name: '플래그편집', urlPattern: 'example.com' });
+const flagId = createdFlag.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: flagId,
+    name: '플래그편집',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    fields: [{ id: 'n', label: '이름', selector: '#user-name', value: '덮이면안됨', type: 'text', handEdit: true }]
+  }
+});
+nameInput._value = '페이지이름';
+nameInput.classList.remove('fp-hand-edit');
+const flagReplay = await callBackground({ type: 'APPLY_PRESET', presetId: flagId, tabId: 1 });
+const flagRes = flagReplay.data || {};
+check('값 있는 손댈 칸 안 덮음', nameInput._value, '페이지이름');
+check('값 있는 손댈 칸 노란 표시', nameInput.classList.contains('fp-hand-edit'), true);
+check('값 있는 손댈 칸 실패 0', (flagRes.failures || []).length, 0);
+const missFill = await callContent({
+  type: 'APPLY_ACTION',
+  waitMs: 0,
+  field: { id: 'm', label: '없는칸', selector: '#missing-field', value: '값있음', type: 'text', handEdit: false }
+});
+check('손댈 칸 아닌 깨진 셀렉터는 누락', !!(missFill.result && missFill.result.ok === false), true);
+check('누락 라벨이 손댈 칸과 다름', missFill.result && missFill.result.label, '없는칸');
+check('누락에 handEdit 플래그 없음', !!(missFill.result && missFill.result.handEdit), false);
+
+const missHand = await callContent({
+  type: 'APPLY_ACTION',
+  waitMs: 0,
+  field: { id: 'mh', label: '사업자', selector: '#missing-hand', value: '', type: 'text', handEdit: true }
+});
+check('손댈 칸 요소 없음은 누락', !!(missHand.result && missHand.result.ok === false), true);
+
+const createdOff = await callBackground({ type: 'PRESET_CREATE', name: '손댈칸해제', urlPattern: 'example.com' });
+const offId = createdOff.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: offId,
+    name: '손댈칸해제',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    fields: [{ id: 'off1', label: '사업자', selector: '#biz-no', value: '', type: 'text', handEdit: false }]
+  }
+});
+bizInput._value = '해제전값';
+bizInput.classList.remove('fp-hand-edit');
+const offReplay = await callBackground({ type: 'APPLY_PRESET', presetId: offId, tabId: 1 });
+const offRes = offReplay.data || {};
+check('손댈 칸 해제 후 빈 값 적용', bizInput._value, '');
+check('해제 후 노란 표시 없음', bizInput.classList.contains('fp-hand-edit'), false);
+check('해제 후 실패 0 (요소 있음)', (offRes.failures || []).length, 0);
+
+const createdJourneyHand = await callBackground({ type: 'PRESET_CREATE', name: '여정손댈', urlPattern: 'example.com' });
+const jhId = createdJourneyHand.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: jhId,
+    name: '여정손댈',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    startUrl: 'https://example.com/form',
+    fields: [
+      { id: 'jt', label: '이름', selector: '#user-name', value: '여정이름', type: 'text', delay: 0 },
+      { id: 'jb', label: '사업자', selector: '#biz-no', value: '', type: 'text', delay: 0, handEdit: true },
+      { id: 'jc', label: '검색', selector: '#search-btn', value: '검색', type: 'click', delay: 0 }
+    ]
+  }
+});
+nameInput._value = '';
+bizInput._value = '여정사업자';
+bizInput.classList.remove('fp-hand-edit');
+const jhReplay = await callBackground({ type: 'APPLY_PRESET', presetId: jhId, tabId: 1 });
+const jhRes = jhReplay.data || {};
+check('여정 손댈 칸 실패 0', (jhRes.failures || []).length, 0);
+check('여정 고정 칸 채움', nameInput._value, '여정이름');
+check('여정 손댈 칸 유지', bizInput._value, '여정사업자');
+check('여정 손댈 칸 노란 표시', bizInput.classList.contains('fp-hand-edit'), true);
+check('여정 손댈 칸 ok', (jhRes.applied || []).some((a) => a.handEdit && a.label === '사업자'), true);
+check('클릭은 손댈 칸 아님', !(jhRes.applied || []).some((a) => a.label === '검색' && a.handEdit), true);
+
+const createdMerge = await callBackground({ type: 'PRESET_CREATE', name: '머지손댈', urlPattern: 'example.com' });
+const mergeId = createdMerge.data.id;
+await callBackground({ type: 'RECORD_START', presetId: mergeId, tabId: 1 });
+bizInput._value = '임시사업자';
+document.dispatchSyntheticEvent('input', bizInput);
+await sleep(450);
+bizInput._value = '';
+document.dispatchSyntheticEvent('input', bizInput);
+await sleep(450);
+await callBackground({ type: 'RECORD_STOP', presetId: mergeId, tabId: 1 });
+const mergeList = await callBackground({ type: 'PRESET_LIST' });
+const mergeBiz = ((mergeList.data || []).find((p) => p.id === mergeId)?.fields || []).find((f) => f.selector === '#biz-no');
+check('값→빈 머지 handEdit', !!(mergeBiz && mergeBiz.handEdit), true);
+check('값→빈 머지 값 비움', mergeBiz && mergeBiz.value, '');
+bizInput._value = '페이지유지';
+bizInput.classList.remove('fp-hand-edit');
+const mergeReplay = await callBackground({ type: 'APPLY_PRESET', presetId: mergeId, tabId: 1 });
+check('값→빈 머지 재생 안 덮음', bizInput._value, '페이지유지');
+check('값→빈 머지 노란 표시', bizInput.classList.contains('fp-hand-edit'), true);
+check('값→빈 머지 실패 0', ((mergeReplay.data || {}).failures || []).length, 0);
+
+const createdMerge2 = await callBackground({ type: 'PRESET_CREATE', name: '머지채움', urlPattern: 'example.com' });
+const merge2Id = createdMerge2.data.id;
+await callBackground({ type: 'RECORD_START', presetId: merge2Id, tabId: 1 });
+bizInput._value = '';
+document.dispatchSyntheticEvent('input', bizInput);
+await sleep(450);
+bizInput._value = '최종사업자';
+document.dispatchSyntheticEvent('input', bizInput);
+await sleep(450);
+await callBackground({ type: 'RECORD_STOP', presetId: merge2Id, tabId: 1 });
+const merge2List = await callBackground({ type: 'PRESET_LIST' });
+const merge2Biz = ((merge2List.data || []).find((p) => p.id === merge2Id)?.fields || []).find((f) => f.selector === '#biz-no');
+check('빈→값 머지 handEdit 아님', !(merge2Biz && merge2Biz.handEdit), true);
+check('빈→값 머지 최종값', merge2Biz && merge2Biz.value, '최종사업자');
+bizInput._value = '';
+bizInput.classList.remove('fp-hand-edit');
+const merge2Replay = await callBackground({ type: 'APPLY_PRESET', presetId: merge2Id, tabId: 1 });
+check('빈→값 머지 재생 채움', bizInput._value, '최종사업자');
+check('빈→값 머지 노란 표시 없음', bizInput.classList.contains('fp-hand-edit'), false);
+
+console.log('\n[위험 클릭 / 첨부 / 속도 / 리픽 / 스크럽]');
+const createdDanger = await callBackground({ type: 'PRESET_CREATE', name: '위험클릭', urlPattern: 'example.com' });
+const dangerId = createdDanger.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: dangerId,
+    name: '위험클릭',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    startUrl: 'https://example.com/form',
+    fields: [
+      { id: 'dn', label: '이름', selector: '#user-name', value: '위험이름', type: 'text', delay: 0 },
+      { id: 'dp', label: '결제', selector: '#pay-btn', value: '결제하기', type: 'click', delay: 0 },
+      { id: 'db', label: '사업자', selector: '#biz-no', value: '이후값', type: 'text', delay: 0 }
+    ]
+  }
+});
+nameInput._value = '';
+bizInput._value = '유지';
+payBtn.clickCount = 0;
+const dangerReplay = await callBackground({ type: 'APPLY_PRESET', presetId: dangerId, tabId: 1 });
+const dangerRes = dangerReplay.data || {};
+check('위험 클릭 전 칸 채움', nameInput._value, '위험이름');
+check('위험 클릭 안 함', payBtn.clickCount, 0);
+check('위험 클릭 blocked', (dangerRes.applied || []).some((a) => a.blocked && a.label === '결제'), true);
+check('위험 클릭 이후 필드 중단', bizInput._value, '유지');
+
+const createdFile = await callBackground({ type: 'PRESET_CREATE', name: '첨부', urlPattern: 'example.com' });
+const fileId = createdFile.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: fileId,
+    name: '첨부',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    fields: [
+      { id: 'fn', label: '이름', selector: '#user-name', value: '첨부이름', type: 'text' },
+      { id: 'ff', label: '파일', selector: '#attach', value: 'x.png', type: 'text' }
+    ]
+  }
+});
+nameInput._value = '';
+fileInput._value = 'old';
+const fileReplay = await callBackground({ type: 'APPLY_PRESET', presetId: fileId, tabId: 1 });
+const fileRes = fileReplay.data || {};
+check('첨부 전 칸 채움', nameInput._value, '첨부이름');
+check('파일 값 안 넣음', fileInput._value, 'old');
+check('파일 fileStop', (fileRes.applied || []).some((a) => a.fileStop), true);
+check('파일 실패 아님', (fileRes.failures || []).length, 0);
+
+await callBackground({ type: 'SETTINGS_SET', replayPace: 'slow' });
+const createdFast = await callBackground({ type: 'PRESET_CREATE', name: '빠름프리셋', urlPattern: 'example.com' });
+const fastId = createdFast.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: fastId,
+    name: '빠름프리셋',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    replayPace: 'fast',
+    fields: [{ id: 'pn', label: '이름', selector: '#user-name', value: '속도이름', type: 'text', delay: 1000 }]
+  }
+});
+nameInput._value = '';
+const tPace = Date.now();
+const pacePresetReplay = await callBackground({ type: 'APPLY_PRESET', presetId: fastId, tabId: 1 });
+const paceMs = Date.now() - tPace;
+check('프리셋 빠름이 전역 느림을 덮음', nameInput._value, '속도이름');
+check('프리셋 빠름이면 1초 delay가 짧아짐', paceMs < 400, true);
+check('프리셋 속도 재생 ok', !!pacePresetReplay.ok, true);
+await callBackground({ type: 'SETTINGS_SET', replayPace: 'normal' });
+
+// 최고속도: delay 무시 즉시 적용
+const createdMax = await callBackground({ type: 'PRESET_CREATE', name: '최고속도프리셋', urlPattern: 'example.com' });
+const maxId = createdMax.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: maxId,
+    name: '최고속도프리셋',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    replayPace: 'max',
+    fields: [{ id: 'pm', label: '이름', selector: '#user-name', value: '최고이름', type: 'text', delay: 2000 }]
+  }
+});
+nameInput._value = '';
+const tMax = Date.now();
+const maxReplay = await callBackground({ type: 'APPLY_PRESET', presetId: maxId, tabId: 1 });
+const maxMs = Date.now() - tMax;
+check('최고속도 프리셋 채움', nameInput._value, '최고이름');
+check('최고속도는 2초 delay 무시 즉시', maxMs < 300, true);
+check('최고속도 재생 ok', !!maxReplay.ok, true);
+const maxPace = await callBackground({ type: 'SETTINGS_SET', replayPace: 'max' });
+check('전역 최고속도 저장', maxPace.data && maxPace.data.replayPace, 'max');
+await callBackground({ type: 'SETTINGS_SET', replayPace: 'normal' });
+
+const createdRepick = await callBackground({ type: 'PRESET_CREATE', name: '리픽', urlPattern: 'example.com' });
+const repickId = createdRepick.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: repickId,
+    name: '리픽',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    fields: [{ id: 'rf1', label: '이름', selector: '#missing-old', value: '리픽이름', type: 'text' }]
+  }
+});
+nameInput._value = '';
+const beforeRepick = await callBackground({ type: 'APPLY_PRESET', presetId: repickId, tabId: 1 });
+check('리픽 전 누락', ((beforeRepick.data || {}).failures || []).length > 0, true);
+await callBackground({
+  type: 'CAPTURE_SAVE_FIELD',
+  presetId: repickId,
+  replaceFieldId: 'rf1',
+  field: { id: 'rf1', label: '이름', selector: '#user-name', value: '리픽이름', type: 'text' }
+});
+nameInput._value = '';
+const afterRepick = await callBackground({ type: 'APPLY_PRESET', presetId: repickId, tabId: 1 });
+check('리픽 후 채움', nameInput._value, '리픽이름');
+check('리픽 후 실패 0', ((afterRepick.data || {}).failures || []).length, 0);
+
+// repick 빈 값 → 손댈 칸 (verification-gap patch)
+const createdRepickEmpty = await callBackground({ type: 'PRESET_CREATE', name: '리픽빈값', urlPattern: 'example.com' });
+const repickEmptyId = createdRepickEmpty.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: repickEmptyId,
+    name: '리픽빈값',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    fields: [{ id: 'rf2', label: '사업자', selector: '#biz-no', value: '기존값', type: 'text', handEdit: false }]
+  }
+});
+bizInput._value = '페이지유지';
+bizInput.classList.remove('fp-hand-edit');
+const beforeEmpty = await callBackground({ type: 'APPLY_PRESET', presetId: repickEmptyId, tabId: 1 });
+check('리픽빈값 전 채움', bizInput._value, '기존값');
+await callBackground({
+  type: 'CAPTURE_SAVE_FIELD',
+  presetId: repickEmptyId,
+  replaceFieldId: 'rf2',
+  field: { id: 'rf2', label: '사업자', selector: '#biz-no', value: '', type: 'text' }
+});
+const listEmpty = await callBackground({ type: 'PRESET_LIST' });
+const emptyField = ((listEmpty.data || []).find((p) => p.id === repickEmptyId)?.fields || []).find((f) => f.id === 'rf2');
+check('리픽 빈 값 저장', emptyField && emptyField.value, '');
+check('리픽 빈 값 handEdit', !!(emptyField && emptyField.handEdit), true);
+check('리픽 빈 값 id 유지', emptyField && emptyField.id, 'rf2');
+bizInput._value = '페이지유지2';
+bizInput.classList.remove('fp-hand-edit');
+const afterEmpty = await callBackground({ type: 'APPLY_PRESET', presetId: repickEmptyId, tabId: 1 });
+check('리픽 빈 값 재생 안 덮음', bizInput._value, '페이지유지2');
+check('리픽 빈 값 노란 표시', bizInput.classList.contains('fp-hand-edit'), true);
+check('리픽 빈 값 실패 0', ((afterEmpty.data || {}).failures || []).length, 0);
+
+const createdScrub = await callBackground({ type: 'PRESET_CREATE', name: '스크럽원본', urlPattern: 'example.com' });
+const scrubId = createdScrub.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: scrubId,
+    name: '스크럽원본',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    replayPace: 'fast',
+    fields: [
+      { id: 's1', label: '이름', selector: '#user-name', value: '비밀이름', type: 'text', handEdit: false },
+      { id: 's2', label: '결제', selector: '#pay-btn', value: '결제하기', type: 'click', replayBlocked: true }
+    ]
+  }
+});
+const exp = await callBackground({ type: 'EXPORT_DATA', scrub: true });
+const scrubPreset = ((exp.data || {}).presets || []).find((p) => p.id === scrubId);
+check('스크럽 값 비움', !!(scrubPreset && scrubPreset.fields.every((f) => f.value === '')), true);
+check('스크럽 그룹 키', Array.isArray((exp.data || {}).groups), true);
+check('스크럽 속도 유지', !!(scrubPreset && scrubPreset.replayPace === 'fast'), true);
+check('스크럽 금지 플래그 유지', !!(scrubPreset && scrubPreset.fields.some((f) => f.replayBlocked)), true);
+const fullExp = await callBackground({ type: 'EXPORT_DATA' });
+const fullPreset = ((fullExp.data || {}).presets || []).find((p) => p.id === scrubId);
+check('실값 내보내기는 값 유지', !!(fullPreset && fullPreset.fields.some((f) => f.value === '비밀이름')), true);
+const imp = await callBackground({
+  type: 'IMPORT_DATA',
+  data: { schemaVersion: 1, appId: 'dasihagi', presets: [scrubPreset], groups: [] }
+});
+check('스크럽 가져오기 성공', !!(imp.ok && imp.data && imp.data.importedPresets >= 1), true);
+// scrub handEdit 보존 (verification-gap patch)
+const createdScrubHand = await callBackground({ type: 'PRESET_CREATE', name: '스크럽손댈', urlPattern: 'example.com' });
+const scrubHandId = createdScrubHand.data.id;
+await callBackground({
+  type: 'PRESET_UPDATE',
+  preset: {
+    id: scrubHandId,
+    name: '스크럽손댈',
+    urlPattern: 'example.com',
+    urlPatterns: ['example.com'],
+    replayPace: 'slow',
+    fields: [
+      { id: 'sh1', label: '사업자', selector: '#biz-no', value: '비밀사업자', type: 'text', handEdit: true },
+      { id: 'sh2', label: '결제', selector: '#pay-btn', value: '결제하기', type: 'click', replayBlocked: true }
+    ]
+  }
+});
+const expHand = await callBackground({ type: 'EXPORT_DATA', scrub: true });
+const scrubHand = ((expHand.data || {}).presets || []).find((p) => p.id === scrubHandId);
+check('스크럽 손댈 칸 값 비움', scrubHand && scrubHand.fields.find((f) => f.id === 'sh1')?.value === '', true);
+check('스크럽 손댈 칸 플래그 유지', !!(scrubHand && scrubHand.fields.find((f) => f.id === 'sh1')?.handEdit), true);
+check('스크럽 금지 플래그 유지(손댈 프리셋)', !!(scrubHand && scrubHand.fields.find((f) => f.id === 'sh2')?.replayBlocked), true);
+check('스크럽 속도 유지(slow)', scrubHand && scrubHand.replayPace, 'slow');
+const impHand = await callBackground({
+  type: 'IMPORT_DATA',
+  data: { schemaVersion: 1, appId: 'dasihagi', presets: [scrubHand], groups: [] }
+});
+check('스크럽 손댈 가져오기 성공', !!(impHand.ok && impHand.data && impHand.data.importedPresets >= 1), true);
+const listHandScrub = await callBackground({ type: 'PRESET_LIST' });
+const importedHand = (listHandScrub.data || []).find((p) => p.name === '스크럽손댈' && p.id !== scrubHandId);
+const importedFieldHand = importedHand && importedHand.fields.find((f) => f.label === '사업자');
+check('가져온 손댈 칸 handEdit 복원', !!(importedFieldHand && importedFieldHand.handEdit), true);
+check('가져온 손댈 칸 값 비어있음', importedFieldHand && importedFieldHand.value, '');
+bizInput._value = '가져온페이지';
+bizInput.classList.remove('fp-hand-edit');
+if (importedHand) {
+  const replayHandScrub = await callBackground({ type: 'APPLY_PRESET', presetId: importedHand.id, tabId: 1 });
+  check('가져온 손댈 프리셋 재생 안 덮음', bizInput._value, '가져온페이지');
+  check('가져온 손댈 노란 표시', bizInput.classList.contains('fp-hand-edit'), true);
+}
+
+const jhList = await callBackground({ type: 'PRESET_LIST' });
+const jhStored = (jhList.data || []).find((p) => p.id === jhId);
+const jhClick = (jhStored && jhStored.fields || []).find((f) => f.type === 'click');
+check('클릭 필드에 handEdit 없음', !!(jhClick && !('handEdit' in jhClick)), true);
 
 // ============================================================
 // 7. 결과
